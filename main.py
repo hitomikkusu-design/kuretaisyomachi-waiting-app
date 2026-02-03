@@ -22,7 +22,7 @@ def liff_page():
   <script>
     async function main() {
       try {
-        await liff.init({ liffId: "★ここにLIFF ID★" });
+        await liff.init({ liffId:2009039274-MktGOzU6});
 
         if (!liff.isLoggedIn()) {
           liff.login();
