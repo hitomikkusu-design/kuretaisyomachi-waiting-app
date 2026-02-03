@@ -3,259 +3,203 @@ import json
 import hmac
 import hashlib
 import base64
-from datetime import datetime, date
-from typing import Dict, List, Optional
-
 import httpx
-from fastapi import FastAPI, Request, Header, HTTPException
+from typing import List, Dict, Any, Optional
+
+from fastapi import FastAPI, Request, Header
+from fastapi.responses import PlainTextResponse, JSONResponse
 
 app = FastAPI()
 
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
-ADMIN_USER_IDS = set(
-    [x.strip() for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
-)
+# =========
+# 環境変数
+# =========
+CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
+ADMIN_USER_IDS = [u.strip() for u in os.getenv("ADMIN_USER_IDS", "").split(",") if u.strip()]
 
-# ---- 超シンプルな永続化（Render再起動で消える可能性あり）
-# 本格運用はDB/スプレッドシートに移行推奨。今は「動く完成版」優先。
-STATE_FILE = "/tmp/waiting_state.json"
+LINE_REPLY_ENDPOINT = "https://api.line.me/v2/bot/message/reply"
+LINE_PUSH_ENDPOINT  = "https://api.line.me/v2/bot/message/push"
 
-
-def _today_key() -> str:
-    return date.today().isoformat()
-
-
-def load_state() -> dict:
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {
-            "date": _today_key(),
-            "current": 0,          # 呼び出し済みの番号（ここから次へ進む）
-            "next_no": 1,          # 次に発行する受付番号
-            "queue": [],           # [{no, userId, name, createdAt}]
-        }
+# =========
+# メモリ上の待ちリスト（まずは簡易版）
+# 本番はスプレッドシート等に保存へ
+# =========
+# item: {"name": str, "party": int, "userId": str}
+QUEUE: List[Dict[str, Any]] = []
 
 
-def save_state(state: dict) -> None:
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+# =========
+# ユーティリティ
+# =========
+def is_admin(user_id: str) -> bool:
+    return user_id in ADMIN_USER_IDS
 
-
-def ensure_today(state: dict) -> dict:
-    if state.get("date") != _today_key():
-        # 日付が変わったら自動リセット（朝イチで前日の残りを消さないよう注意したい場合はOFFにしてね）
-        state = {
-            "date": _today_key(),
-            "current": 0,
-            "next_no": 1,
-            "queue": [],
-        }
-    return state
-
-
-def verify_signature(body: bytes, x_line_signature: str) -> bool:
-    if not LINE_CHANNEL_SECRET:
+def verify_signature(body: bytes, x_line_signature: Optional[str]) -> bool:
+    if not CHANNEL_SECRET:
         return False
-    mac = hmac.new(LINE_CHANNEL_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
-    expected = base64.b64encode(mac).decode("utf-8")
-    return hmac.compare_digest(expected, x_line_signature)
+    if not x_line_signature:
+        return False
+    digest = hmac.new(CHANNEL_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+    signature = base64.b64encode(digest).decode("utf-8")
+    return hmac.compare_digest(signature, x_line_signature)
 
-
-async def reply_message(reply_token: str, text: str) -> None:
-    if not LINE_CHANNEL_ACCESS_TOKEN:
+async def line_reply(reply_token: str, text: str):
+    if not CHANNEL_ACCESS_TOKEN:
         return
-
-    url = "https://api.line.me/v2/bot/message/reply"
     headers = {
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}",
         "Content-Type": "application/json",
     }
     payload = {
         "replyToken": reply_token,
         "messages": [{"type": "text", "text": text}],
     }
-
     async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(url, headers=headers, json=payload)
-        # 失敗しても落とさない（ログで追えるように）
-        if r.status_code >= 300:
-            print("LINE reply failed:", r.status_code, r.text)
+        await client.post(LINE_REPLY_ENDPOINT, headers=headers, json=payload)
+
+async def line_push(to_user_id: str, text: str):
+    if not CHANNEL_ACCESS_TOKEN:
+        return
+    headers = {
+        "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "to": to_user_id,
+        "messages": [{"type": "text", "text": text}],
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        await client.post(LINE_PUSH_ENDPOINT, headers=headers, json=payload)
+
+def format_queue() -> str:
+    if not QUEUE:
+        return "📭 いま待ちゼロやで。"
+    lines = ["🧾 現在の待ちリスト"]
+    for i, item in enumerate(QUEUE, start=1):
+        lines.append(f"{i}. {item['name']}（{item['party']}名）")
+    return "\n".join(lines)
+
+def help_text() -> str:
+    return (
+        "✅ 管理コマンド（管理者だけ有効）\n"
+        "・一覧\n"
+        "・追加 名前 人数   例）追加 山田 2\n"
+        "・次   （先頭を呼び出す）\n"
+        "・完了 （先頭を削除）\n"
+        "・クリア（全消し）\n"
+        "・ヘルプ\n"
+    )
 
 
-def find_entry_by_user(state: dict, user_id: str) -> Optional[dict]:
-    for item in state["queue"]:
-        if item["userId"] == user_id:
-            return item
-    return None
-
-
-def position_ahead(state: dict, user_id: str) -> Optional[int]:
-    # 自分より前に何人いるか
-    for idx, item in enumerate(state["queue"]):
-        if item["userId"] == user_id:
-            return idx
-    return None
-
-
-def cleanup_called(state: dict) -> dict:
-    # current より小さい番号はキューから削る（呼び出し済み整理）
-    cur = state.get("current", 0)
-    state["queue"] = [x for x in state["queue"] if x["no"] > cur]
-    return state
-
-
+# =========
+# ルート確認
+# =========
 @app.get("/")
 def root():
     return {"message": "Kuretaisyomachi waiting app is running!"}
 
 
+# =========
+# LINE Webhook
+# =========
 @app.post("/callback")
-async def callback(
-    request: Request,
-    x_line_signature: str = Header(default=""),
-):
+async def callback(request: Request, x_line_signature: str = Header(default=None)):
     body = await request.body()
 
-    # 署名チェック
+    # 署名検証（安全）
     if not verify_signature(body, x_line_signature):
-        raise HTTPException(status_code=400, detail="Bad signature")
+        # LINEの検証が通らん時の原因になるので、ここはちゃんと弾く
+        return PlainTextResponse("Invalid signature", status_code=400)
 
     data = json.loads(body.decode("utf-8"))
+
+    # eventsが無い時は何もしない
     events = data.get("events", [])
+    if not events:
+        return JSONResponse({"status": "ok"})
 
-    state = ensure_today(load_state())
-    state = cleanup_called(state)
-
-    for ev in events:
-        ev_type = ev.get("type")
-        reply_token = ev.get("replyToken", "")
-        source = ev.get("source", {})
-        user_id = source.get("userId", "")
-
-        # follow（友だち追加）
-        if ev_type == "follow" and reply_token:
-            msg = (
-                "友だち追加ありがとう！\n"
-                "【順番待ち】\n"
-                "・受付 →「受付」\n"
-                "・状況確認 →「状況」\n"
-                "・キャンセル →「キャンセル」\n"
-                "\n"
-                "（店側）\n"
-                "・次の呼び出し →「次」\n"
-                "・一覧 →「一覧」\n"
-                "・リセット →「リセット」"
-            )
-            await reply_message(reply_token, msg)
+    for event in events:
+        event_type = event.get("type")
+        if event_type != "message":
             continue
 
-        # メッセージ以外は無視（必要なら追加）
-        if ev_type != "message":
-            continue
-
-        message = ev.get("message", {})
+        message = event.get("message", {})
         if message.get("type") != "text":
-            if reply_token:
-                await reply_message(reply_token, "文字で「受付」「状況」「キャンセル」って送ってね。")
             continue
 
         text = (message.get("text") or "").strip()
+        reply_token = event.get("replyToken")
+        user_id = (event.get("source") or {}).get("userId", "")
 
-        # ---- 管理コマンド（ADMIN_USER_IDS に入ってる人だけ）
-        is_admin = (user_id in ADMIN_USER_IDS) if ADMIN_USER_IDS else False
-
-        if is_admin and text in ["次", "つぎ", "NEXT", "next"]:
-            # 次の番号へ進める
-            if len(state["queue"]) == 0:
-                await reply_message(reply_token, "いま待ちリストは空です。")
-            else:
-                # 先頭を呼び出し
-                called = state["queue"][0]
-                state["current"] = called["no"]
-                state = cleanup_called(state)
-                save_state(state)
-                await reply_message(reply_token, f"呼び出し：{called['no']}番（次のお客さんへ）")
+        # ---- 管理者じゃない場合：ここで終了（必要なら案内文だけ返す）
+        if not is_admin(user_id):
+            # お客さん用に何か返したいならここ編集（今は無反応にしておくのが安全）
+            await line_reply(reply_token, "受付はスタッフが操作します🙏")
             continue
 
-        if is_admin and text in ["一覧", "リスト", "list"]:
-            if len(state["queue"]) == 0:
-                await reply_message(reply_token, "いま待ちリストは空です。")
-            else:
-                lines = [f"{x['no']}番" for x in state["queue"][:20]]
-                more = "" if len(state["queue"]) <= 20 else f"\n…他 {len(state['queue'])-20} 件"
-                await reply_message(reply_token, "いまの待ち：\n" + "\n".join(lines) + more)
+        # ---- 管理者コマンド処理
+        # コマンド：ヘルプ
+        if text in ["ヘルプ", "help", "？", "?"]:
+            await line_reply(reply_token, help_text())
             continue
 
-        if is_admin and text in ["リセット", "reset", "RESET"]:
-            state = {
-                "date": _today_key(),
-                "current": 0,
-                "next_no": 1,
-                "queue": [],
-            }
-            save_state(state)
-            await reply_message(reply_token, "待ちリストをリセットしました。")
+        # コマンド：一覧
+        if text in ["一覧", "list"]:
+            await line_reply(reply_token, format_queue())
             continue
 
-        # ---- お客さんコマンド
-        if text in ["受付", "うけつけ", "並ぶ", "ならぶ"]:
-            existing = find_entry_by_user(state, user_id)
-            if existing:
-                ahead = position_ahead(state, user_id)
-                msg = f"すでに受付済みです。\nあなたは {existing['no']}番。\n前に {ahead} 人います。"
-                await reply_message(reply_token, msg)
-            else:
-                no = state["next_no"]
-                state["next_no"] += 1
-                entry = {
-                    "no": no,
-                    "userId": user_id,
-                    "name": "unknown",
-                    "createdAt": datetime.now().isoformat(timespec="seconds"),
-                }
-                state["queue"].append(entry)
-                save_state(state)
-
-                ahead = position_ahead(state, user_id)
-                msg = f"受付完了！\nあなたは {no}番です。\n前に {ahead} 人います。\n\n状況は「状況」で確認できます。"
-                await reply_message(reply_token, msg)
+        # コマンド：クリア
+        if text in ["クリア", "clear"]:
+            QUEUE.clear()
+            await line_reply(reply_token, "🧹 待ちリストを全消ししたで。")
             continue
 
-        if text in ["状況", "じょうきょう", "確認", "かくにん"]:
-            existing = find_entry_by_user(state, user_id)
-            if not existing:
-                await reply_message(reply_token, "まだ受付していません。\n「受付」と送ってね。")
-            else:
-                ahead = position_ahead(state, user_id)
-                cur = state.get("current", 0)
-                msg = (
-                    f"あなたは {existing['no']}番です。\n"
-                    f"前に {ahead} 人います。\n"
-                    f"いま呼び出し済み：{cur}番まで"
-                )
-                await reply_message(reply_token, msg)
+        # コマンド：追加 名前 人数
+        # 例）追加 山田 2
+        if text.startswith("追加"):
+            parts = text.split()
+            if len(parts) < 3:
+                await line_reply(reply_token, "❗使い方：追加 名前 人数（例：追加 山田 2）")
+                continue
+            name = parts[1]
+            try:
+                party = int(parts[2])
+            except:
+                await line_reply(reply_token, "❗人数は数字で入れてな（例：追加 山田 2）")
+                continue
+            if party <= 0:
+                await line_reply(reply_token, "❗人数は1以上でお願い🙏")
+                continue
+
+            QUEUE.append({"name": name, "party": party, "userId": user_id})
+            await line_reply(reply_token, f"✅ 追加したで：{name}（{party}名）\n\n" + format_queue())
             continue
 
-        if text in ["キャンセル", "取り消し", "取消", "やめる"]:
-            existing = find_entry_by_user(state, user_id)
-            if not existing:
-                await reply_message(reply_token, "キャンセル対象がありません。\n（まだ受付していないみたい）")
-            else:
-                state["queue"] = [x for x in state["queue"] if x["userId"] != user_id]
-                save_state(state)
-                await reply_message(reply_token, f"{existing['no']}番の受付をキャンセルしました。")
+        # コマンド：次（先頭を呼ぶ）
+        if text in ["次", "つぎ", "next"]:
+            if not QUEUE:
+                await line_reply(reply_token, "📭 いま待ちゼロやで。")
+                continue
+            item = QUEUE[0]
+            name = item["name"]
+            party = item["party"]
+
+            # ※本来は「お客さんのuserId」にpushする。いまは簡易で“管理者に確認”だけ返す。
+            # お客さんのuserIdを紐づける設計（QRで友だち追加→受付登録）にしたらpush先を変える。
+            await line_reply(reply_token, f"📣 次の呼び出し：{name}（{party}名）\n（※お客さんへの自動通知は次のフェーズで実装）")
             continue
 
-        # その他の文
-        help_msg = (
-            "使い方はこちら👇\n"
-            "・受付 →「受付」\n"
-            "・状況 →「状況」\n"
-            "・キャンセル →「キャンセル」"
-        )
-        await reply_message(reply_token, help_msg)
+        # コマンド：完了（先頭を削除）
+        if text in ["完了", "削除", "done"]:
+            if not QUEUE:
+                await line_reply(reply_token, "📭 いま待ちゼロやで。")
+                continue
+            item = QUEUE.pop(0)
+            await line_reply(reply_token, f"✅ 完了：{item['name']}（{item['party']}名）\n\n" + format_queue())
+            continue
 
-    return {"status": "ok"}
+        # 何でもない時
+        await line_reply(reply_token, "✅ 管理コマンドは「ヘルプ」見てな。")
+
+    return JSONResponse({"status": "ok"})
