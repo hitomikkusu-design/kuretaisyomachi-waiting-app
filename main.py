@@ -1,71 +1,89 @@
-from fastapi import FastAPI, Request, Header
 import os
+import json
 import hmac
 import hashlib
 import base64
-import json
+import httpx
+from fastapi import FastAPI, Request, Header, HTTPException
 
 app = FastAPI()
 
-# =========================
-# 0) 動作確認（ブラウザで開く用）
-# =========================
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+
+def verify_signature(body: bytes, signature: str) -> bool:
+    if not LINE_CHANNEL_SECRET or not signature:
+        return False
+    mac = hmac.new(
+        LINE_CHANNEL_SECRET.encode("utf-8"),
+        body,
+        hashlib.sha256
+    ).digest()
+    expected = base64.b64encode(mac).decode("utf-8")
+    return hmac.compare_digest(expected, signature)
+
 @app.get("/")
 def root():
     return {"message": "Kuretaiyomachi waiting app is running!"}
 
-
-# =========================
-# 1) LINE署名検証（X-Line-Signature）
-# =========================
-def verify_line_signature(body: bytes, x_line_signature: str) -> bool:
-    """
-    LINEのWebhookは必ず署名が付いてくる。
-    Channel Secret でHMAC-SHA256してbase64したものと一致すればOK。
-    """
-    channel_secret = os.getenv("LINE_CHANNEL_SECRET", "")
-    if not channel_secret:
-        # Secretが未設定なら検証できない（本番では必ず設定して）
-        return False
-
-    hash_ = hmac.new(channel_secret.encode("utf-8"), body, hashlib.sha256).digest()
-    signature = base64.b64encode(hash_).decode("utf-8")
-    return signature == x_line_signature
-
-
-# =========================
-# 2) LINE Webhook受け口（ここにPOSTが来る）
-#    LINE Developers の Webhook URL にこれを入れる：
-#    https://xxxxx.onrender.com/callback
-# =========================
 @app.post("/callback")
 async def callback(
     request: Request,
-    x_line_signature: str = Header(default="")
+    x_line_signature: str = Header(None),
 ):
     body = await request.body()
 
-    # 署名チェック
-    if not verify_line_signature(body, x_line_signature):
-        return {"status": "ng", "reason": "invalid signature or missing secret"}
+    # 署名検証（これが通らないとLINEは危険判定する）
+    if not verify_signature(body, x_line_signature):
+        raise HTTPException(status_code=400, detail="Invalid signature")
 
-    # JSONとして中身を見る（ログ確認用）
-    try:
-        payload = json.loads(body.decode("utf-8"))
-    except Exception:
-        payload = {"raw": body.decode("utf-8", errors="ignore")}
+    payload = json.loads(body.decode("utf-8"))
 
-    print("=== LINE WEBHOOK RECEIVED ===")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    # events がない場合もあるので安全に
+    events = payload.get("events", [])
+    if not events:
+        return {"status": "ok"}
 
-    # とりあえず200を返す（重要：200以外だとLINE側でエラーになる）
+    # まずは「オウム返信」だけ実装（正常に返せたら次に進む）
+    for event in events:
+        if event.get("type") != "message":
+            continue
+
+        message = event.get("message", {})
+        if message.get("type") != "text":
+            continue
+
+        reply_token = event.get("replyToken")
+        user_text = message.get("text", "")
+
+        if not reply_token:
+            continue
+
+        # LINEに返信
+        await reply_to_line(reply_token, f"受け取ったで：{user_text}")
+
     return {"status": "ok"}
 
 
-# =========================
-# 3) GET /callback を踏んだ時に見える表示（手で開いたとき用）
-# =========================
-@app.get("/callback")
-def callback_get():
-    return {"detail": "This endpoint is for LINE webhook POST only."}
+async def reply_to_line(reply_token: str, text: str):
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        # トークン未設定はここで止める
+        raise HTTPException(status_code=500, detail="Missing access token")
+
+    url = "https://api.line.me/v2/bot/message/reply"
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "replyToken": reply_token,
+        "messages": [{"type": "text", "text": text}]
+    }
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(url, headers=headers, json=data)
+
+    if r.status_code != 200:
+        # エラー内容をRenderログに出す（デバッグ命）
+        raise HTTPException(status_code=500, detail=f"LINE reply failed: {r.status_code} {r.text}")
 
