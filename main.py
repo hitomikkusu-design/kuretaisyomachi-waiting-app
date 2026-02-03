@@ -203,3 +203,36 @@ async def callback(request: Request, x_line_signature: str = Header(default=None
         await line_reply(reply_token, "✅ 管理コマンドは「ヘルプ」見てな。")
 
     return JSONResponse({"status": "ok"})
+from fastapi.responses import HTMLResponse
+
+@app.get("/liff", response_class=HTMLResponse)
+def liff_page():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>大正町 順番待ち</title>
+      <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+    </head>
+    <body>
+      <h1>大正町 順番待ち</h1>
+      <p id="user">読み込み中...</p>
+
+      <script>
+        const liffId = "あとでここを差し替え";
+
+        liff.init({ liffId }).then(() => {
+          if (!liff.isLoggedIn()) {
+            liff.login();
+          } else {
+            liff.getProfile().then(profile => {
+              document.getElementById("user").innerText =
+                profile.displayName + " さん、ようこそ";
+            });
+          }
+        });
+      </script>
+    </body>
+    </html>
+    """
