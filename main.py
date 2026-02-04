@@ -18,7 +18,8 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 
 # Render Persistent Disk を使う場合は /var/data を推奨
-DB_DIR = os.getenv("DB_DIR", "/var/data")
+DB_DIR = os.getenv("DB_DIR", "/opt/render/project/src/db"
+)
 DB_PATH = os.getenv("DB_PATH", os.path.join(DB_DIR, "queue.db"))
 
 DEFAULT_SHOP = os.getenv("DEFAULT_SHOP", "大正町")
