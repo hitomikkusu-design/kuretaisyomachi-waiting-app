@@ -1,89 +1,69 @@
 import os
-from datetime import datetime
-from typing import Optional
-
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
+app = FastAPI()
 
-# ==========
-# ENV
-# ==========
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 
-if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    # Render で env が未設定のまま起動しても落ちないようにする（/statusで気づける）
-    line_bot_api = None
-    handler = None
-else:
-    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-    handler = WebhookHandler(LINE_CHANNEL_SECRET)
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-app = FastAPI()
+WELCOME_TEXT = (
+    "ようこそ😊「大正町 順番待ち」です。\n"
+    "まずは下のどれかを送ってね👇\n\n"
+    "✅ 受付（順番待ちに登録）\n"
+    "✅ 状況（今の順番を確認）\n"
+    "✅ キャンセル（受付を取り消す）\n"
+    "✅ ヘルプ（使い方）"
+)
 
+HELP_TEXT = (
+    "使い方👇\n\n"
+    "①「受付」→ 順番待ち登録\n"
+    "②「状況」→ あと何人か確認\n"
+    "③「キャンセル」→ 受付取り消し\n\n"
+    "迷ったら「受付」って送ってみて😊"
+)
 
-# ==========
-# UI (簡易ページ)
-# ==========
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return """
-    <html>
-      <head><meta charset="utf-8"><title>大正町 順番待ち</title></head>
-      <body style="font-family: sans-serif; padding: 24px;">
-        <h2>大正町 順番待ち（Bot方式）</h2>
-        <p>この方式は LIFF の権限問題を回避して、サーバーからLINEに通知します。</p>
-        <ul>
-          <li><a href="/reception">受付ページ（ダミー）</a></li>
-          <li><a href="/status">ステータス確認</a></li>
-        </ul>
-      </body>
-    </html>
-    """
+UNKNOWN_TEXT = (
+    "ごめんね🙏 ちょっとだけ分からなかった💦\n\n"
+    "できることはこれ👇\n"
+    "✅ 受付\n"
+    "✅ 状況\n"
+    "✅ キャンセル\n"
+    "✅ ヘルプ\n\n"
+    "まずは「受付」って送ってみてね😊"
+)
 
+# いまは「アプリ感」を先に作るため、受付番号は仮で返す（後でスプレッドシート連携で本番化）
+def fake_register(user_id: str):
+    # 本番ではここでDB/スプレッドシートに保存して受付番号を発行
+    number = user_id[-4:]  # 仮：末尾4桁を番号っぽく見せる
+    return number
 
-@app.get("/reception", response_class=HTMLResponse)
-def reception():
-    # ここはあとで受付フォームに拡張できる
-    return """
-    <html>
-      <head><meta charset="utf-8"><title>受付</title></head>
-      <body style="font-family: sans-serif; padding: 24px;">
-        <h3>受付（仮）</h3>
-        <p>いまは Bot の疎通確認が目的です。</p>
-        <p>LINEのトークで「受付」など送るとBotが返します。</p>
-        <p><a href="/">戻る</a></p>
-      </body>
-    </html>
-    """
+def fake_status(user_id: str):
+    # 本番ではここで「あなたの番号」「残り人数」を計算
+    number = user_id[-4:]
+    remaining = 3
+    eta_min = 15
+    return number, remaining, eta_min
 
+def fake_cancel(user_id: str):
+    # 本番ではここで受付データ削除
+    return True
 
 @app.get("/status")
 def status():
-    return {
-        "ok": True,
-        "time": datetime.utcnow().isoformat() + "Z",
-        "env_ready": bool(LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET),
-        "webhook": "/webhook/line",
-    }
+    return {"ok": True}
 
-
-# ==========
-# LINE Webhook
-# ==========
 @app.post("/webhook/line")
 async def webhook(request: Request):
-    if handler is None:
-        return JSONResponse(
-            {"ok": False, "error": "LINE env is missing. Set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET."},
-            status_code=500,
-        )
-
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
     body_text = body.decode("utf-8")
@@ -91,26 +71,64 @@ async def webhook(request: Request):
     try:
         handler.handle(body_text, signature)
     except InvalidSignatureError:
-        return JSONResponse({"ok": False, "error": "Invalid signature"}, status_code=400)
-
+        return JSONResponse(status_code=400, content={"detail": "Invalid signature"})
     return {"ok": True}
 
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event: MessageEvent):
+    text = (event.message.text or "").strip()
+    user_id = event.source.user_id
 
-# ==========
-# LINE message handler
-# ==========
-if handler is not None and line_bot_api is not None:
+    # ひらがな/カタカナ/揺れを吸収
+    t = text.lower()
 
-    @handler.add(MessageEvent, message=TextMessage)
-    def handle_message(event):
-        user_text = (event.message.text or "").strip()
+    if t in ["ヘルプ", "help", "使い方", "つかいかた"]:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=HELP_TEXT)
+        )
+        return
 
-        # ここに会話ロジックを増やしていける（順番待ち登録、呼び出し、キャンセル等）
-        if user_text in ["受付", "順番待ち", "登録"]:
-            reply = "受付したい内容を送ってね（例：2名、田中、など）"
-        elif user_text:
-            reply = f"受け取ったよ：『{user_text}』\n（※ここは後で順番待ちロジックに繋げる）"
-        else:
-            reply = "テキストを送ってね"
+    if t in ["受付", "順番待ち", "登録", "うけつけ"]:
+        num = fake_register(user_id)
+        msg = (
+            "受付できたよ✅\n"
+            f"受付番号：{num}\n"
+            "呼び出しが近づいたらLINEでお知らせするね📣\n\n"
+            "途中で取り消すなら「キャンセル」って送ってね。"
+        )
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=msg)
+        )
+        return
 
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    if t in ["状況", "確認", "あと何人", "あとなんにん", "じょうきょう"]:
+        num, remaining, eta = fake_status(user_id)
+        msg = (
+            "いまの状況はこちら👇\n"
+            f"あなたの番号：{num}\n"
+            f"あと {remaining} 人で呼び出し予定\n\n"
+            f"目安：だいたい {eta} 分くらい😊\n"
+            "※混雑状況で前後するよ"
+        )
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=msg)
+        )
+        return
+
+    if t in ["キャンセル", "取消", "取り消し", "とりけし", "cancel"]:
+        ok = fake_cancel(user_id)
+        msg = "キャンセルOK✅\nまた必要になったら「受付」って送ってね😊" if ok else "キャンセルできなかった🙏 もう一回試してね。"
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=msg)
+        )
+        return
+
+    # それ以外（迷子救済）
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=UNKNOWN_TEXT)
+    )
