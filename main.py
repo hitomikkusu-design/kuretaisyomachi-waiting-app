@@ -1,228 +1,119 @@
-import os
-import re
-import sqlite3
-import secrets
-from datetime import datetime
+from fastapi.responses import HTMLResponse
+import html as _html
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+@app.get("/liff", response_class=HTMLResponse)
+def web_form():
+    shop = _html.escape(SHOP_NAME)
 
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+    template = """
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>__SHOP__ 順番受付</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans JP", sans-serif;
+      background:#f6f7f8; margin:0; padding:16px;
+    }
+    .card { background:#fff; border-radius:14px; padding:16px;
+      box-shadow:0 6px 20px rgba(0,0,0,.06); max-width:520px; margin:0 auto; }
+    h1 { font-size:18px; margin:0 0 12px; }
+    label { display:block; font-size:13px; margin:12px 0 6px; }
+    input { width:100%; padding:12px; border:1px solid #ddd; border-radius:10px; font-size:16px; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+    .btn { flex:1; min-width:72px; padding:12px; border-radius:10px;
+      border:1px solid #ddd; background:#fff; font-size:16px; }
+    .btn.active { border-color:#111; background:#eef; }
+    .primary { width:100%; margin-top:14px; padding:14px; border:0; border-radius:12px;
+      background:#111; color:#fff; font-size:16px; }
+    .note { font-size:12px; color:#666; margin-top:10px; line-height:1.55; }
+    .ok { margin-top:12px; padding:12px; border-radius:12px; background:#f0fff4; border:1px solid #bfe7c7; }
+    .err { margin-top:12px; padding:12px; border-radius:12px; background:#fff3f3; border:1px solid #f0b4b4; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>__SHOP__ 順番受付</h1>
 
-# ========= ENV =========
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
-ADMIN_PASS = os.getenv("ADMIN_PASS", "")  # 例：taisho123（空なら誰でも呼出できる）
+    <label>お名前</label>
+    <input id="name" placeholder="例：山本 太郎"/>
 
-# DB（今の運用に合わせて固定）
-DB_DIR = "/opt/render/project/src/db"
-DB_PATH = os.path.join(DB_DIR, "queue.db")
+    <label>人数</label>
+    <div class="row" id="party">
+      <button class="btn" onclick="setParty(event,1)">1人</button>
+      <button class="btn" onclick="setParty(event,2)">2人</button>
+      <button class="btn" onclick="setParty(event,3)">3人</button>
+      <button class="btn" onclick="setParty(event,4)">4人</button>
+      <button class="btn" onclick="setParty(event,5)">5人</button>
+      <button class="btn" onclick="setParty(event,6)">6人</button>
+    </div>
 
-SHOP_NAME = "山本鮮魚店"
+    <label>電話番号</label>
+    <input id="phone" placeholder="09012345678"/>
 
-app = FastAPI()
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+    <button class="primary" onclick="submitForm()">受付する</button>
 
-os.makedirs(DB_DIR, exist_ok=True)
+    <div id="msg"></div>
 
-# ========= DB =========
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS queue (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        shop TEXT NOT NULL,
-        number INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        phone TEXT NOT NULL,
-        party_size INTEGER NOT NULL,
-        status TEXT NOT NULL,           -- waiting/called/canceled/done
-        created_at TEXT NOT NULL,
-        called_at TEXT,
-        line_user_id TEXT,              -- nullでもOK（後で連携）
-        link_code TEXT                  -- 連携用6桁コード
-    )
-    """)
-    # ちょい安全：link_code検索用
-    c.execute("CREATE INDEX IF NOT EXISTS idx_queue_link_code ON queue(link_code)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status)")
-    conn.commit()
-    conn.close()
+    <p class="note">
+      ※ 順番が来たら LINE でお知らせします<br>
+      ※ 人数は口頭で変更できます
+    </p>
+  </div>
 
-def conn():
-    return sqlite3.connect(DB_PATH)
+<script>
+let partySize = 0;
 
-def next_number(shop: str) -> int:
-    cn = conn()
-    c = cn.cursor()
-    c.execute("SELECT COALESCE(MAX(number), 0) + 1 FROM queue WHERE shop=?", (shop,))
-    n = int(c.fetchone()[0])
-    cn.close()
-    return n
+function setParty(ev, n) {
+  partySize = n;
+  document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+  ev.target.classList.add('active');
+}
 
-def count_ahead(shop: str, number: int) -> int:
-    cn = conn()
-    c = cn.cursor()
-    c.execute("SELECT COUNT(*) FROM queue WHERE shop=? AND status='waiting' AND number < ?", (shop, number))
-    ahead = int(c.fetchone()[0])
-    cn.close()
-    return ahead
+async function submitForm() {
+  const name = document.getElementById('name').value.trim();
+  const phone = document.getElementById('phone').value.trim();
+  const msg = document.getElementById('msg');
 
-def gen_link_code() -> str:
-    # 6桁（衝突したら作り直す）
-    for _ in range(5):
-        code = str(secrets.randbelow(900000) + 100000)
-        cn = conn()
-        c = cn.cursor()
-        c.execute("SELECT COUNT(*) FROM queue WHERE link_code=?", (code,))
-        exists = int(c.fetchone()[0]) > 0
-        cn.close()
-        if not exists:
-            return code
-    # 最後の手段
-    return str(secrets.randbelow(900000) + 100000)
+  if (!name || !phone || partySize === 0) {
+    msg.innerHTML = '<div class="err">名前・人数・電話番号を入れてや</div>';
+    return;
+  }
 
-def register_web(shop: str, name: str, phone: str, party_size: int) -> dict:
-    number = next_number(shop)
-    link_code = gen_link_code()
-    cn = conn()
-    c = cn.cursor()
-    c.execute("""
-        INSERT INTO queue (shop, number, name, phone, party_size, status, created_at, line_user_id, link_code)
-        VALUES (?, ?, ?, ?, ?, 'waiting', ?, NULL, ?)
-    """, (shop, number, name, phone, party_size, datetime.now().isoformat(), link_code))
-    cn.commit()
-    cn.close()
+  const res = await fetch('/register', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      shop: "__SHOP__",
+      name:name,
+      phone:phone,
+      party_size:partySize
+    })
+  });
 
-    ahead = count_ahead(shop, number)
-    return {"number": number, "ahead": ahead, "link_code": link_code}
+  const data = await res.json();
 
-def link_line_user(shop: str, link_code: str, line_user_id: str) -> dict:
-    # 最新のwaitingを優先で紐付け（同コードは基本1つ）
-    cn = conn()
-    c = cn.cursor()
-    c.execute("""
-        SELECT id, number, party_size, status FROM queue
-        WHERE shop=? AND link_code=?
-        ORDER BY id DESC LIMIT 1
-    """, (shop, link_code))
-    row = c.fetchone()
-    if not row:
-        cn.close()
-        return {"ok": False, "error": "その連携コード、見つからんかったき。もう一回QRから受付してね。"}
+  if (data.ok) {
+    msg.innerHTML = `<div class="ok">
+      受付完了やき！<br>
+      <b>${data.number}番</b> やで。<br><br>
+      このあと自動で LINE が開くきね。
+    </div>`;
 
-    qid, number, party_size, status = int(row[0]), int(row[1]), int(row[2]), row[3]
-    if status != "waiting":
-        cn.close()
-        return {"ok": False, "error": "その番号はもう待ち状態じゃないき。新しく受付してね。"}
+    setTimeout(() => {
+      window.location.href = "https://lin.ee/0uwScY2";
+    }, 1200);
 
-    # すでに他の人に紐付いてたら上書き防止
-    c.execute("SELECT line_user_id FROM queue WHERE id=?", (qid,))
-    current = c.fetchone()[0]
-    if current and current != line_user_id:
-        cn.close()
-        return {"ok": False, "error": "この連携コードはもう使われちゅうき。"}
+  } else {
+    msg.innerHTML = '<div class="err">受付できんかったき、店の人に言うて</div>';
+  }
+}
+</script>
 
-    c.execute("UPDATE queue SET line_user_id=? WHERE id=?", (line_user_id, qid))
-    cn.commit()
-    cn.close()
-
-    ahead = count_ahead(shop, number)
-    return {"ok": True, "number": number, "party_size": party_size, "ahead": ahead}
-
-def get_latest_waiting_by_line(shop: str, line_user_id: str):
-    cn = conn()
-    c = cn.cursor()
-    c.execute("""
-        SELECT number, party_size FROM queue
-        WHERE shop=? AND line_user_id=? AND status='waiting'
-        ORDER BY id DESC LIMIT 1
-    """, (shop, line_user_id))
-    row = c.fetchone()
-    if not row:
-        cn.close()
-        return None
-    number, party_size = int(row[0]), int(row[1])
-    ahead = count_ahead(shop, number)
-    cn.close()
-    return {"number": number, "party_size": party_size, "ahead": ahead}
-
-def cancel_latest_by_line(shop: str, line_user_id: str) -> bool:
-    cn = conn()
-    c = cn.cursor()
-    c.execute("""
-        SELECT id FROM queue
-        WHERE shop=? AND line_user_id=? AND status='waiting'
-        ORDER BY id DESC LIMIT 1
-    """, (shop, line_user_id))
-    row = c.fetchone()
-    if not row:
-        cn.close()
-        return False
-    qid = int(row[0])
-    c.execute("UPDATE queue SET status='canceled' WHERE id=?", (qid,))
-    cn.commit()
-    cn.close()
-    return True
-
-def call_number(shop: str, number: int):
-    cn = conn()
-    c = cn.cursor()
-    c.execute("""
-        SELECT id, name, phone, party_size, line_user_id
-        FROM queue
-        WHERE shop=? AND number=? AND status='waiting'
-        ORDER BY id DESC LIMIT 1
-    """, (shop, number))
-    row = c.fetchone()
-    if not row:
-        cn.close()
-        return None
-
-    qid, name, phone, party_size, line_user_id = int(row[0]), row[1], row[2], int(row[3]), row[4]
-    c.execute("UPDATE queue SET status='called', called_at=? WHERE id=?", (datetime.now().isoformat(), qid))
-    cn.commit()
-    cn.close()
-    return {"name": name, "phone": phone, "party_size": party_size, "line_user_id": line_user_id}
-
-init_db()
-
-# ========= Routes =========
-@app.get("/status")
-def status():
-    return {"ok": True, "shop": SHOP_NAME}
-
-<h2>受付が完了しました</h2>
-
-<p>
-呼び出しは<br>
-<strong>山本鮮魚店 公式LINE</strong> に届きます。
-</p>
-
-<p>
-【重要】<br>
-このあと <strong>必ず</strong> 下のボタンを押して<br>
-LINEを開いてください。
-</p>
-
-<a href="https://lin.ee/0uwScY2"
-   style="
-     display:inline-block;
-     padding:14px 22px;
-     background:#06C755;
-     color:#fff;
-     font-size:18px;
-     font-weight:bold;
-     border-radius:8px;
-     text-decoration:none;
-   ">
-▶ LINEを開く
-</a>
-
-<p style="margin-top:16px; font-size:14px;">
-※ 呼び出しはLINEでのみ行います
-</p>
+</body>
+</html>
+"""
+    template = template.replace("__SHOP__", shop)
+    return HTMLResponse(content=template)
