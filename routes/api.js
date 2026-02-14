@@ -1,63 +1,48 @@
-const express = require('express');
-const router = express.Router();
-const queueModel = require('../models/queueModel');
-const lineService = require('../services/lineService');
-
-// Get current queue (for Admin)
-router.get('/queue', (req, res) => {
-    const queue = queueModel.readQueue();
-    const waiting = queue.filter(q => q.status !== 'completed'); // Show waiting and called
-    res.json(waiting);
-});
-
-// Check-in (User)
-router.post('/checkin', (req, res) => {
-    const { name, count, phone } = req.body;
-    if (!name || !count) {
-        return res.status(400).json({ error: 'Name and count are required' });
-    }
-    const ticket = queueModel.addToQueue(name, count, phone);
-    res.json(ticket);
-});
-
-// Link LINE User
-router.post('/link-line', (req, res) => {
-    const { ticketId, userId } = req.body;
-    if (!ticketId || !userId) {
-        return res.status(400).json({ error: 'Ticket ID and User ID are required' });
-    }
-    const success = queueModel.linkLineUser(ticketId, userId);
-    if (success) {
-        res.json({ success: true });
-    } else {
-        res.status(404).json({ error: 'Ticket not found' });
-    }
-});
-
 // Call Customer (Admin)
 router.post('/call', async (req, res) => {
+  try {
     const { id } = req.body;
+
+    if (!id) {
+      return res.status(400).json({ error: 'IDがありません' });
+    }
+
     const ticket = queueModel.updateStatus(id, 'called');
 
     if (!ticket) {
-        return res.status(404).json({ error: 'Ticket not found' });
+      return res.status(404).json({ error: 'Ticket not found' });
     }
+
+    console.log('=== CALL TRIGGERED ===');
+    console.log('Ticket ID:', ticket.id);
+    console.log('LINE User ID:', ticket.lineUserId);
 
     if (ticket.lineUserId) {
-        const message = `順番きたで！\n今から7分以内においでや。\n遅れそうなら返信してね。\n整理番号：${ticket.id}`;
-        await lineService.pushMessage(ticket.lineUserId, message);
+
+      const message = `【久礼大正町市場】
+
+順番来たき！🐟
+今から5分以内に来てや〜
+
+遅れそうやったら
+このLINEに返信してや🙏
+
+整理番号：${ticket.id}`;
+
+      console.log('Sending message:', message);
+
+      await lineService.pushMessage(ticket.lineUserId, message);
+
+      console.log('Message sent successfully');
+
     } else {
-        console.log(`Customer ${ticket.id} has no LINE linked.`);
+      console.log(`Customer ${ticket.id} has no LINE linked`);
     }
 
     res.json({ success: true, ticket });
-});
 
-// Complete (Admin)
-router.post('/complete', (req, res) => {
-    const { id } = req.body;
-    const ticket = queueModel.updateStatus(id, 'completed');
-    res.json({ success: true, ticket });
+  } catch (error) {
+    console.error('CALL ERROR:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
 });
-
-module.exports = router;
