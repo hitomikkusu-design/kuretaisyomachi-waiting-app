@@ -65,3 +65,9 @@ router.post('/complete', async (req, res) => {
 });
 
 module.exports = router;
+// Webhook (LINE)
+router.post('/webhook', async (req, res) => {
+  console.log("📩 Webhook received");
+
+  res.status(200).send("OK");
+});
