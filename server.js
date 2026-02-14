@@ -1,23 +1,23 @@
 const express = require("express");
 
-const apiRouter = require("./routes/api");
-const webhookRouter = require("./routes/webhook");
+const apiRoute = require("../routes/api");
+const webhookRoute = require("../routes/webhook");
 
 const app = express();
 
-// まずは生存確認（Render/ブラウザで開ける）
-app.get("/health", (req, res) => res.status(200).send("ok"));
+// LINE署名検証で「生のbody」が必要なので webhook だけ raw を先に当てる
+app.post("/webhook", express.raw({ type: "*/*" }), webhookRoute);
 
-// JSON系の通常APIはこれ
+// それ以外は通常のJSON
 app.use(express.json());
 
-// あなたの通常API
-app.use("/api", apiRouter);
+// 疎通確認
+app.get("/", (req, res) => res.status(200).send("OK"));
 
-// LINE Webhook（ここが最重要）
-app.use("/webhook", webhookRouter);
+// API
+app.use("/api", apiRoute);
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
 });
