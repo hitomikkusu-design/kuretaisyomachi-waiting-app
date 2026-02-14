@@ -1,37 +1,39 @@
+// src/server.js
 require("dotenv").config();
+
 const express = require("express");
-const bodyParser = require("body-parser");
+const path = require("path");
+
+const api = require("../routes/api");
+const webhook = require("../routes/webhook");
 
 const app = express();
-const PORT = process.env.PORT || 10000;
 
-// LINE署名検証用（raw body 必須）
+// 🔸 LINE署名検証のため raw body を保持
 app.use(
-  bodyParser.raw({
-    type: "*/*",
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf; // Buffer
+    },
   })
 );
 
-// ここ超重要👇
-const webhook = require("./routes/webhook");
+// health check
+app.get("/", (req, res) => res.status(200).send("OK"));
 
-// エンドポイント登録
+// API
+app.use("/api", api);
+
+// Webhook（POST本番）
 app.post("/webhook", webhook);
 
-// 確認用
-app.get("/", (req, res) => {
-  res.send("Server is running");
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-// 既にある想定
-const webhook = require("./routes/webhook");
-
-// 追加👇（これが重要）
+// Webhook URL検証対策（GET/HEADも200返す）
 app.get("/webhook", (req, res) => res.status(200).send("OK"));
 app.head("/webhook", (req, res) => res.status(200).end());
 
-// 既存👇
-app.post("/webhook", webhook);
+const port = process.env.PORT || 10000;
+app.listen(port, () => {
+  console.log("BOOT: server started");
+  console.log("Detected service running on port", port);
+  console.log("==> Your service is live 🎉");
+});
