@@ -22,3 +22,7 @@ app.get('/api/liff-id', (req, res) => {
 app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
 });
+console.log("BOOT: server started", new Date().toISOString());
+console.log("ENV CHECK LIFF_ID?", !!process.env.LIFF_ID);
+console.log("ENV CHECK ACCESS TOKEN?", !!process.env.LINE_CHANNEL_ACCESS_TOKEN);
+console.log("ENV CHECK SECRET?", !!process.env.LINE_CHANNEL_SECRET);
