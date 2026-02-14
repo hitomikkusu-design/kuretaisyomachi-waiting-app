@@ -1,28 +1,34 @@
-require('dotenv').config();
 const express = require('express');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-const path = require('path');
-const apiRoutes = require('./routes/api');
+const crypto = require('crypto');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(express.json());
 
-app.use(cors());
-app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public')));
+const PORT = process.env.PORT || 10000;
 
-app.use('/api', apiRoutes);
-
-// LIFF ID Endpoint for frontend
-app.get('/api/liff-id', (req, res) => {
-    res.json({ liffId: process.env.LIFF_ID });
+/* =========================================================
+   🔹 基本確認ルート
+========================================================= */
+app.get('/', (req, res) => {
+  res.send('Kure Waiting App is running 🚀');
 });
 
+app.get('/api/liff_id', (req, res) => {
+  res.json({ liffId: process.env.LIFF_ID });
+});
+
+/* =========================================================
+   🔹 LINE Webhook（検証用 + 本番対応）
+========================================================= */
+app.post('/webhook', (req, res) => {
+  console.log('[WEBHOOK HIT]');
+  res.sendStatus(200);
+});
+
+/* =========================================================
+   🔹 起動
+========================================================= */
 app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
-console.log("BOOT: server started", new Date().toISOString());
-console.log("ENV CHECK LIFF_ID?", !!process.env.LIFF_ID);
-console.log("ENV CHECK ACCESS TOKEN?", !!process.env.LINE_CHANNEL_ACCESS_TOKEN);
-console.log("ENV CHECK SECRET?", !!process.env.LINE_CHANNEL_SECRET);
