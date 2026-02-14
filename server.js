@@ -26,3 +26,12 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+// 既にある想定
+const webhook = require("./routes/webhook");
+
+// 追加👇（これが重要）
+app.get("/webhook", (req, res) => res.status(200).send("OK"));
+app.head("/webhook", (req, res) => res.status(200).end());
+
+// 既存👇
+app.post("/webhook", webhook);
