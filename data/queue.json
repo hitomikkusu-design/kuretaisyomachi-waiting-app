@@ -7,5 +7,14 @@
     "status": "called",
     "lineUserId": null,
     "checkinTime": "2026-02-12T03:00:56.797Z"
+  },
+  {
+    "id": 2,
+    "name": "梶永　瞳",
+    "count": "2",
+    "phone": "08039380075",
+    "status": "waiting",
+    "lineUserId": null,
+    "checkinTime": "2026-02-13T09:24:01.735Z"
   }
 ]
