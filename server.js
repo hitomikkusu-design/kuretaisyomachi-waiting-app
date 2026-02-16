@@ -12,6 +12,7 @@ const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN || '';
 const CHANNEL_SECRET = process.env.CHANNEL_SECRET || '';
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID || '';
 const STORE_NAME = process.env.STORE_NAME || '大正町市場';
+const LINE_ADD_FRIEND_URL = process.env.LINE_ADD_FRIEND_URL || '';
 
 // ── 順番待ちキュー（インメモリ） ──
 let queue = [];
@@ -82,8 +83,12 @@ h1{color:#06c755;font-size:1.3em;margin-bottom:20px}
   res.send(html);
 });
 
-// ── 受付フォームページ ──
+// ── 受付ページ（LINE友だち追加誘導 + フォーム併用） ──
 app.get('/form', (req, res) => {
+  const lineBtn = LINE_ADD_FRIEND_URL
+    ? `<a href="${LINE_ADD_FRIEND_URL}" class="line-btn">LINE友だち追加して受付する</a>`
+    : `<p class="line-search">LINE公式アカウントで<br>「${STORE_NAME}」を検索して友だち追加</p>`;
+
   const html = `<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -92,22 +97,46 @@ app.get('/form', (req, res) => {
 <title>${STORE_NAME} - 順番待ち受付</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;background:#f0f2f5;min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}
-.card{background:#fff;border-radius:16px;padding:32px;box-shadow:0 2px 12px rgba(0,0,0,0.1);max-width:420px;width:100%}
-h1{color:#06c755;font-size:1.3em;text-align:center;margin-bottom:8px}
-.subtitle{text-align:center;color:#666;font-size:0.9em;margin-bottom:24px}
+body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;background:#f0f2f5;min-height:100vh;display:flex;justify-content:center;align-items:flex-start;padding:20px}
+.card{background:#fff;border-radius:16px;padding:32px;box-shadow:0 2px 12px rgba(0,0,0,0.1);max-width:420px;width:100%;margin-top:20px}
+h1{color:#06c755;font-size:1.3em;text-align:center;margin-bottom:4px}
+.wait-now{text-align:center;color:#666;font-size:0.95em;margin-bottom:20px}
+.wait-now strong{color:#06c755;font-size:1.3em}
+.section-title{font-weight:bold;color:#333;font-size:1em;margin-bottom:12px;padding-bottom:8px;border-bottom:2px solid #06c755}
+.recommend{background:#e8f5e9;color:#2e7d32;font-size:0.75em;padding:2px 8px;border-radius:4px;margin-left:6px}
+.line-btn{display:block;width:100%;padding:16px;background:#06c755;color:#fff;border:none;border-radius:10px;font-size:1.1em;font-weight:bold;text-align:center;text-decoration:none;margin-bottom:12px}
+.line-btn:active{background:#05a648}
+.line-search{text-align:center;background:#e8f5e9;padding:16px;border-radius:10px;color:#333;font-size:0.95em;margin-bottom:12px;line-height:1.6}
+.steps{background:#f8f9fa;border-radius:10px;padding:16px;margin-bottom:24px;font-size:0.9em;line-height:1.8;color:#555}
+.steps .step{margin-bottom:4px}
+.divider{text-align:center;color:#aaa;font-size:0.85em;margin:24px 0 16px;position:relative}
+.divider::before,.divider::after{content:'';position:absolute;top:50%;width:35%;height:1px;background:#ddd}
+.divider::before{left:0}
+.divider::after{right:0}
 label{display:block;font-weight:bold;color:#333;margin-bottom:6px;font-size:0.95em}
 input,select{width:100%;padding:12px;border:2px solid #ddd;border-radius:10px;font-size:1em;margin-bottom:16px;appearance:none;-webkit-appearance:none}
 input:focus,select:focus{outline:none;border-color:#06c755}
-button{width:100%;padding:14px;background:#06c755;color:#fff;border:none;border-radius:10px;font-size:1.1em;font-weight:bold;cursor:pointer}
-button:active{background:#05a648}
-.wait-info{text-align:center;color:#888;font-size:0.85em;margin-top:16px}
+.form-submit{width:100%;padding:14px;background:#888;color:#fff;border:none;border-radius:10px;font-size:1em;font-weight:bold;cursor:pointer}
+.form-submit:active{background:#666}
+.form-note{text-align:center;color:#e65100;font-size:0.8em;margin-top:8px;line-height:1.5}
 </style>
 </head>
 <body>
 <div class="card">
   <h1>${STORE_NAME}</h1>
-  <p class="subtitle">順番待ち受付</p>
+  <p class="wait-now">現在の待ち <strong>${queue.length}</strong> 組</p>
+
+  <p class="section-title">LINE受付<span class="recommend">おすすめ</span></p>
+  ${lineBtn}
+  <div class="steps">
+    <div class="step">1. 上のボタンでLINE友だち追加</div>
+    <div class="step">2. トーク画面で「受付 名前 人数」と送信</div>
+    <div class="step">&nbsp;&nbsp;&nbsp;例:「受付 山田 3」</div>
+    <div class="step">3. 順番が来たらLINEでお知らせ!</div>
+  </div>
+
+  <div class="divider">LINE以外で受付</div>
+  <p class="section-title">フォーム受付</p>
   <form method="POST" action="/form">
     <label for="name">お名前</label>
     <input type="text" id="name" name="name" placeholder="例: 山田" required maxlength="20">
@@ -120,9 +149,9 @@ button:active{background:#05a648}
       <option value="5">5名</option>
       <option value="6">6名以上</option>
     </select>
-    <button type="submit">受付する</button>
+    <button type="submit" class="form-submit">フォームで受付する</button>
+    <p class="form-note">※フォーム受付ではLINE通知が届きません<br>お店の近くでお待ちください</p>
   </form>
-  <p class="wait-info">現在の待ち: ${queue.length}組</p>
 </div>
 </body>
 </html>`;
@@ -269,11 +298,17 @@ async function handleEvent(event) {
   }
 
   // ── 一般コマンド ──
-  if (text === '受付') {
+  // 「受付」「受付 山田」「受付 山田 3」に対応
+  if (text === '受付' || text.startsWith('受付 ') || text.startsWith('受付　')) {
+    const parts = text.split(/[\s　]+/);  // 半角・全角スペース両対応
+    const name = parts[1] || 'LINE受付';
+    const partyRaw = (parts[2] || '1').replace(/[名人組]/g, '');  // 「3名」→「3」
+    const party = Math.min(Math.max(parseInt(partyRaw, 10) || 1, 1), 20);
+
     const entry = {
       id: Date.now().toString(36),
-      name: 'LINE受付',
-      party: 1,
+      name: name.substring(0, 20),
+      party: party,
       source: 'LINE',
       userId: userId,
       time: new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
@@ -285,10 +320,15 @@ async function handleEvent(event) {
 
     // 管理者に通知
     if (ADMIN_USER_ID && CHANNEL_ACCESS_TOKEN && userId !== ADMIN_USER_ID) {
-      pushMessage(ADMIN_USER_ID, `🔔 LINE受付\n${position}番目に追加\n現在 ${position}組待ち`).catch(() => {});
+      pushMessage(ADMIN_USER_ID, `🔔 LINE受付\n${name}さん ${party}名\n現在 ${position}組待ち`).catch(() => {});
     }
 
-    return replyMessage(replyToken, `✅ 受付しました\nあなたは ${position}番目です\n順番が来たらお知らせします`);
+    let replyText = `✅ 受付しました\n${name}さん ${party}名\nあなたは ${position}番目です\n順番が来たらLINEでお知らせします`;
+    if (parts.length === 1) {
+      replyText += `\n\n💡 名前・人数つきで受付もできます\n例:「受付 山田 3」`;
+    }
+
+    return replyMessage(replyToken, replyText);
   }
 
   if (text === '状況' || text === '確認') {
@@ -303,6 +343,8 @@ async function handleEvent(event) {
   // ヘルプ（何を送っても返す）
   let helpMsg = `${STORE_NAME} 順番待ちシステム\n\n`;
   helpMsg += `「受付」→ 順番待ちに並ぶ\n`;
+  helpMsg += `「受付 名前 人数」→ 名前と人数つきで受付\n`;
+  helpMsg += `　例: 受付 山田 3\n`;
   helpMsg += `「状況」→ 自分の順番を確認\n`;
   if (isAdmin) {
     helpMsg += `\n--- 管理者メニュー ---\n`;
@@ -376,5 +418,6 @@ app.listen(PORT, () => {
   console.log(`Webhook: /webhook`);
   console.log(`管理者ID: ${ADMIN_USER_ID ? '設定済み' : '未設定'}`);
   console.log(`トークン: ${CHANNEL_ACCESS_TOKEN ? '設定済み' : '未設定'}`);
+  console.log(`友だち追加URL: ${LINE_ADD_FRIEND_URL ? '設定済み' : '未設定'}`);
   console.log('================================');
 });
