@@ -200,20 +200,59 @@ h1{color:#06c755;font-size:1.3em;margin-bottom:16px}
 .info{font-size:1.1em;color:#333;margin-bottom:8px}
 .position{font-size:2.5em;font-weight:bold;color:#06c755;margin:16px 0}
 .note{color:#999;font-size:0.85em;margin-top:20px;line-height:1.6}
+.called{display:none;background:#06c755;color:#fff;border-radius:12px;padding:20px;margin-top:16px;font-size:1.1em;font-weight:bold;line-height:1.6}
+.called.show{display:block}
+.updating{color:#aaa;font-size:0.75em;margin-top:12px}
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="check">✅</div>
-  <h1>受付完了しました</h1>
+  <div class="check" id="icon">✅</div>
+  <h1 id="title">受付完了しました</h1>
   <p class="info">${name}さん（${party}名）</p>
-  <p>あなたの順番</p>
-  <div class="position">${position}<span style="font-size:0.4em;color:#666">番目</span></div>
-  <p class="note">順番が近づきましたらお呼びします。<br>この画面を閉じても大丈夫です。</p>
+  <p id="label">あなたの順番</p>
+  <div class="position" id="pos">${position}<span style="font-size:0.4em;color:#666">番目</span></div>
+  <div class="called" id="called">順番が来ました！<br>お店にお越しください</div>
+  <p class="note" id="note">順番が近づきましたらこの画面でお知らせします。<br>このページを開いたままお待ちください。</p>
+  <p class="updating" id="updating">自動更新中...</p>
 </div>
+<script>
+(function(){
+  var id = "${entry.id}";
+  var timer = setInterval(function(){
+    fetch("/api/position/" + id)
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(d.called){
+          document.getElementById("icon").textContent = "🎉";
+          document.getElementById("title").textContent = "順番です！";
+          document.getElementById("label").style.display = "none";
+          document.getElementById("pos").style.display = "none";
+          document.getElementById("called").classList.add("show");
+          document.getElementById("note").style.display = "none";
+          document.getElementById("updating").textContent = "";
+          clearInterval(timer);
+        } else {
+          document.getElementById("pos").innerHTML = d.position + '<span style="font-size:0.4em;color:#666">番目</span>';
+        }
+      })
+      .catch(function(){});
+  }, 10000);
+})();
+</script>
 </body>
 </html>`;
   res.send(html);
+});
+
+// ── 順番確認API（フォーム受付者向け） ──
+app.get('/api/position/:id', (req, res) => {
+  const id = req.params.id;
+  const index = queue.findIndex((e) => e.id === id);
+  if (index === -1) {
+    return res.json({ found: false, position: 0, total: queue.length, called: true });
+  }
+  res.json({ found: true, position: index + 1, total: queue.length, called: false });
 });
 
 // ── 店頭用QRコード表示ページ ──
