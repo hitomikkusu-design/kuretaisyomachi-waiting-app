@@ -1,13 +1,16 @@
 {
   "name": "kuretaisyomachi-waiting-app",
-  "version": "3.0.0",
-  "description": "久礼大正町市場 LINE順番待ちアプリ 完成版",
+  "version": "4.0.0",
+  "description": "久礼大正町市場 順番待ちシステム（SQLite + LINE通知）",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.21.0",
+    "@line/bot-sdk": "^9.0.0",
+    "better-sqlite3": "^11.0.0",
+    "qrcode": "^1.5.4"
   },
   "engines": {
     "node": ">=18.0.0"
