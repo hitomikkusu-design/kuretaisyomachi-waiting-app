@@ -81,13 +81,15 @@ db.exec(`CREATE TABLE IF NOT EXISTS tickets (
   link_token  TEXT DEFAULT '',
   created_at  TEXT DEFAULT (datetime('now','localtime'))
 )`);
-// link_token カラムが無い既存DBへの互換対応
+// 既存DBへの互換対応
 try { db.exec("ALTER TABLE tickets ADD COLUMN link_token TEXT DEFAULT ''"); } catch (_) {}
+try { db.exec("ALTER TABLE tickets ADD COLUMN called_at TEXT DEFAULT ''"); } catch (_) {}
 
 const Q = {
   insert:    db.prepare('INSERT INTO tickets (name, phone, people, link_token) VALUES (?, ?, ?, ?)'),
   get:       db.prepare('SELECT * FROM tickets WHERE id = ?'),
-  setStatus: db.prepare('UPDATE tickets SET status = ? WHERE id = ?'),
+  setStatus:  db.prepare('UPDATE tickets SET status = ? WHERE id = ?'),
+  setCalled:  db.prepare("UPDATE tickets SET status = 'called', called_at = ? WHERE id = ?"),
   linkLine:  db.prepare('UPDATE tickets SET line_user_id = ? WHERE id = ?'),
   del:       db.prepare('DELETE FROM tickets WHERE id = ?'),
   waiting:   db.prepare("SELECT * FROM tickets WHERE status='waiting' ORDER BY id"),
@@ -305,21 +307,25 @@ app.get('/admin', (_req, res) => {
   const waiting = Q.waiting.all();
   const called  = Q.called.all();
 
-  const TH = '<tr><th>No</th><th>名前</th><th>電話</th><th>人数</th><th>時刻</th><th>LINE</th><th>操作</th></tr>';
+  const WAIT_TH = '<tr><th>No</th><th>名前</th><th>電話</th><th>人数</th><th>時刻</th><th>LINE</th><th>操作</th></tr>';
+  const CALL_TH = '<tr><th>No</th><th>名前</th><th>電話</th><th>人数</th><th>残り</th><th>操作</th></tr>';
 
-  function row(t, btns) {
+  function waitRow(t) {
     const ln = t.line_user_id ? '✅' : '-';
     const tm = t.created_at ? t.created_at.substring(11, 16) : '';
+    const btns = `<button class="btn bg sm" onclick="act('call',${t.id})">呼び出し</button> <button class="btn br sm" onclick="act('delete',${t.id})">削除</button>`;
     return `<tr><td><b>#${t.id}</b></td><td>${t.name}</td><td>${t.phone||'-'}</td><td>${t.people}名</td><td>${tm}</td><td>${ln}</td><td>${btns}</td></tr>`;
   }
 
-  const waitRows = waiting.map(t => row(t,
-    `<button class="btn bg sm" onclick="act('call',${t.id})">呼出</button><button class="btn br sm" onclick="act('delete',${t.id})">削除</button>`
-  )).join('');
+  function callRow(t) {
+    const ca = t.called_at || '';
+    const btns = `<button class="btn bo sm" onclick="act('recall',${t.id})">再呼出</button> <button class="btn bo sm" onclick="act('done',${t.id})">完了</button> <button class="btn bg2 sm" onclick="act('requeue',${t.id})">戻す</button>`;
+    const skipBtn = `<button class="btn br sm skip-btn" onclick="act('skip',${t.id})" style="display:none" data-skip-id="${t.id}">飛ばす</button>`;
+    return `<tr data-called-at="${ca}" data-id="${t.id}"><td><b>#${t.id}</b></td><td>${t.name}</td><td>${t.phone||'-'}</td><td>${t.people}名</td><td class="timer-cell">--:--</td><td>${btns} ${skipBtn}</td></tr>`;
+  }
 
-  const callRows = called.map(t => row(t,
-    `<button class="btn bo sm" onclick="act('done',${t.id})">完了</button><button class="btn bg2 sm" onclick="act('requeue',${t.id})">戻す</button><button class="btn br sm" onclick="act('delete',${t.id})">削除</button>`
-  )).join('');
+  const waitRows = waiting.map(t => waitRow(t)).join('');
+  const callRows = called.map(t => callRow(t)).join('');
 
   res.send(layout(`${STORE_NAME} 管理`, `
 <div class="card">
@@ -335,11 +341,11 @@ app.get('/admin', (_req, res) => {
     </div>
   </div>
 
-  ${called.length ? `<h2 class="sh" style="color:#ff9800">呼び出し中</h2><div class="tw"><table>${TH}${callRows}</table></div><hr style="margin:16px 0;border:none;border-top:1px solid #eee">` : ''}
+  ${called.length ? `<h2 class="sh" style="color:#ff9800">呼び出し中</h2><div class="tw"><table>${CALL_TH}${callRows}</table></div><hr style="margin:16px 0;border:none;border-top:1px solid #eee">` : ''}
 
   <h2 class="sh">待ち一覧（${waiting.length}組）</h2>
   ${waiting.length
-    ? `<div class="tw"><table>${TH}${waitRows}</table></div>`
+    ? `<div class="tw"><table>${WAIT_TH}${waitRows}</table></div>`
     : '<p style="color:#aaa;text-align:center;padding:16px">待ちなし</p>'}
 </div>
 <div style="text-align:center;margin-top:8px">
@@ -349,19 +355,49 @@ app.get('/admin', (_req, res) => {
 <script>
 async function act(a,id){
   if(a==='delete'&&!confirm('削除しますか？'))return;
-  var r=await fetch('/'+a+'/'+id,{method:'POST'});
+  if(a==='skip'&&!confirm('飛ばしますか？'))return;
+  var route=a==='recall'?'call':a;
+  var r=await fetch('/'+route+'/'+id,{method:'POST'});
   var d=await r.json();
-  if(a==='call'&&d.success)alert('呼び出しました');
+  if((a==='call'||a==='recall')&&d.success)alert('呼び出しました');
   location.reload();
 }
-setTimeout(function(){location.reload()},15000);
+var LIMIT=7*60*1000;
+function tick(){
+  document.querySelectorAll('[data-called-at]').forEach(function(tr){
+    var ca=tr.getAttribute('data-called-at');
+    if(!ca)return;
+    var elapsed=Date.now()-new Date(ca).getTime();
+    var remain=LIMIT-elapsed;
+    var cell=tr.querySelector('.timer-cell');
+    var sid=tr.getAttribute('data-id');
+    var skipBtn=tr.querySelector('.skip-btn');
+    if(remain<=0){
+      cell.textContent='時間切れ';
+      cell.style.color='#e53935';
+      cell.style.fontWeight='bold';
+      tr.style.background='#fbe9e7';
+      if(skipBtn)skipBtn.style.display='inline-block';
+    }else{
+      var m=Math.floor(remain/60000);
+      var s=Math.floor((remain%60000)/1000);
+      cell.textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s;
+      if(remain<120000){cell.style.color='#e53935';cell.style.fontWeight='bold';}
+      else if(remain<240000){cell.style.color='#ff9800';}
+      else{cell.style.color='#333';}
+    }
+  });
+}
+tick();setInterval(tick,1000);
+setTimeout(function(){location.reload()},60000);
 </script>`,
 `.sh{font-size:1em;color:#333;margin-bottom:8px}
 .tw{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:.82em}
 th{background:#f8f9fa;padding:7px 5px;text-align:left;font-size:.78em;color:#666;white-space:nowrap}
 td{padding:7px 5px;border-bottom:1px solid #f0f0f0;white-space:nowrap}
-.sm{padding:3px 8px;font-size:.75em;margin:1px}`));
+.sm{padding:3px 8px;font-size:.75em;margin:1px}
+.timer-cell{font-family:monospace;font-size:1.1em;min-width:56px}`));
 });
 
 // ══════════════════════════════════════════
@@ -428,18 +464,20 @@ app.post('/call/:id', async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const t  = Q.get.get(id);
   if (!t) return res.status(404).json({ success: false, message: '受付番号が見つかりません' });
-  if (t.status !== 'waiting') return res.status(400).json({ success: false, message: `状態が ${t.status} です` });
+  if (t.status !== 'waiting' && t.status !== 'called') return res.status(400).json({ success: false, message: `状態が ${t.status} です` });
 
-  Q.setStatus.run('called', id);
+  const now = new Date().toISOString();
+  Q.setCalled.run(now, id);
+
+  const callMsg = `大正町市場やき！\n${id}番のお客さん、順番きたで〜！\n7分以内に戻ってきてや。\n来んかったら次に回すきね。`;
 
   // 管理者へLINE通知
   if (ADMIN_USER_ID) {
-    await pushMsg(ADMIN_USER_ID, `${id}番のお客様を呼び出しました`);
+    await pushMsg(ADMIN_USER_ID, callMsg);
   }
 
   if (ENABLE_CUSTOMER_PUSH && t.line_user_id) {
-    // お客様へ直接通知（ENABLE_CUSTOMER_PUSH=true かつ LINE連携済み）
-    await pushMsg(t.line_user_id, `順番きたき、7分以内に来てや〜！ 受付番号：${id}`);
+    await pushMsg(t.line_user_id, callMsg);
   }
   res.json({ success: true });
 });
@@ -453,6 +491,17 @@ app.post('/done/:id', (_req, res) => {
   if (!t) return res.status(404).json({ ok: false, message: '見つかりません' });
   Q.setStatus.run('done', id);
   res.json({ ok: true, message: `${t.name}さんを完了にしました` });
+});
+
+// ══════════════════════════════════════════
+//  POST /skip/:id ── 飛ばし（時間切れ・来店なし）
+// ══════════════════════════════════════════
+app.post('/skip/:id', (_req, res) => {
+  const id = parseInt(_req.params.id, 10);
+  const t  = Q.get.get(id);
+  if (!t) return res.status(404).json({ success: false, message: '見つかりません' });
+  Q.setStatus.run('skipped', id);
+  res.json({ success: true, message: `${t.name}さんを飛ばしました` });
 });
 
 // ══════════════════════════════════════════
