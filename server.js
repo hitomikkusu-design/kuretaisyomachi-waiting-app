@@ -316,6 +316,24 @@ h1{font-size:2em;color:#06c755;margin-bottom:8px}
   res.send(html);
 });
 
+// ── お客様呼び出し（管理画面/外部連携用） ──
+app.post('/call/:id', (req, res) => {
+  const id = req.params.id;
+  const index = queue.findIndex((e) => e.id === id);
+  if (index === -1) {
+    return res.status(404).json({ ok: false, message: '該当する受付が見つかりません' });
+  }
+  const entry = queue.splice(index, 1)[0];
+  saveBackup();
+
+  // LINE受付の場合はプッシュ通知
+  if (entry.userId && CHANNEL_ACCESS_TOKEN) {
+    pushMessage(entry.userId, `🎉 ${entry.name}さん、順番です！\nお店にお越しください。`).catch(() => {});
+  }
+
+  res.json({ ok: true, message: `${entry.name}さんを呼び出しました`, entry: entry, remaining: queue.length });
+});
+
 // ── LINE Webhook ──
 app.post('/webhook', (req, res) => {
   // まず200を返す（LINE platformは3秒でタイムアウトする）
