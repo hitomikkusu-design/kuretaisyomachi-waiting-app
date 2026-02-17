@@ -10,8 +10,8 @@ const path    = require('path');
 //  環境変数
 // ══════════════════════════════════════════
 const PORT       = process.env.PORT || 3000;
-const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
-const LINE_SECRET = process.env.LINE_CHANNEL_SECRET || '';
+const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || process.env.CHANNEL_ACCESS_TOKEN || '';
+const LINE_SECRET = process.env.LINE_CHANNEL_SECRET || process.env.CHANNEL_SECRET || '';
 const BASE_URL   = (process.env.BASE_URL || '').replace(/\/$/, '');
 const STORE_NAME = process.env.STORE_NAME || '久礼大正町市場';
 
@@ -125,7 +125,7 @@ ${extraCss || ''}
 // ══════════════════════════════════════════
 //  GET /
 // ══════════════════════════════════════════
-app.get('/', (_req, res) => res.send('Server OK'));
+app.get('/', (_req, res) => res.send('Server running'));
 
 // ══════════════════════════════════════════
 //  GET /form ── 受付フォーム
@@ -136,7 +136,7 @@ app.get('/form', (_req, res) => {
 <div class="card" style="text-align:center">
   <h1 class="g">${STORE_NAME}</h1>
   <p class="sub">現在の待ち <b class="g big">${w}</b> 組</p>
-  <form method="POST" action="/form" style="text-align:left;margin-top:20px">
+  <form method="POST" action="/register" style="text-align:left;margin-top:20px">
     <label>お名前 <span style="color:red">*</span></label>
     <input type="text" name="name" required maxlength="20" placeholder="例: 山田">
     <label>電話番号</label>
@@ -156,9 +156,9 @@ input:focus,select:focus{outline:none;border-color:#06c755}`));
 });
 
 // ══════════════════════════════════════════
-//  POST /form ── 受付登録
+//  POST /register ── 受付登録
 // ══════════════════════════════════════════
-app.post('/form', (req, res) => {
+app.post('/register', (req, res) => {
   const name   = (req.body.name || '').trim().substring(0, 20);
   const phone  = (req.body.phone || '').trim().substring(0, 20);
   const people = Math.min(Math.max(parseInt(req.body.people, 10) || 1, 1), 20);
