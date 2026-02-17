@@ -349,7 +349,9 @@ app.get('/admin', (_req, res) => {
 <script>
 async function act(a,id){
   if(a==='delete'&&!confirm('削除しますか？'))return;
-  await fetch('/'+a+'/'+id,{method:'POST'});
+  var r=await fetch('/'+a+'/'+id,{method:'POST'});
+  var d=await r.json();
+  if(a==='call'&&d.success)alert('呼び出しました');
   location.reload();
 }
 setTimeout(function(){location.reload()},15000);
@@ -425,20 +427,21 @@ h1{font-size:2em;color:#06c755;margin-bottom:6px}
 app.post('/call/:id', async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const t  = Q.get.get(id);
-  if (!t) return res.status(404).json({ ok: false, message: '受付番号が見つかりません' });
-  if (t.status !== 'waiting') return res.status(400).json({ ok: false, message: `状態が ${t.status} です` });
+  if (!t) return res.status(404).json({ success: false, message: '受付番号が見つかりません' });
+  if (t.status !== 'waiting') return res.status(400).json({ success: false, message: `状態が ${t.status} です` });
 
   Q.setStatus.run('called', id);
+
+  // 管理者へLINE通知
+  if (ADMIN_USER_ID) {
+    await pushMsg(ADMIN_USER_ID, `${id}番のお客様を呼び出しました`);
+  }
 
   if (ENABLE_CUSTOMER_PUSH && t.line_user_id) {
     // お客様へ直接通知（ENABLE_CUSTOMER_PUSH=true かつ LINE連携済み）
     await pushMsg(t.line_user_id, `順番きたき、7分以内に来てや〜！ 受付番号：${id}`);
-  } else if (ADMIN_USER_ID) {
-    // 管理者に電話依頼（お客様pushが無効 or LINE未連携）
-    const phoneInfo = t.phone ? `\n📞 ${t.phone}` : '\n📞 電話番号なし';
-    await pushMsg(ADMIN_USER_ID, `⚠️ No:${id} ${t.name}さんを呼んでや〜${phoneInfo}`);
   }
-  res.json({ ok: true, message: `${t.name}さんを呼び出しました` });
+  res.json({ success: true });
 });
 
 // ══════════════════════════════════════════
