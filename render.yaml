@@ -17,3 +17,9 @@ services:
         sync: false
       - key: LINE_ADD_FRIEND_URL
         sync: false
+      - key: BASE_URL
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false

@@ -1,2 +1,5 @@
 node_modules/
 queue_backup.json
+waitlist.db
+waitlist.db-wal
+waitlist.db-shm
