@@ -14,6 +14,9 @@ const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || process.env.CHANNEL_
 const LINE_SECRET = process.env.LINE_CHANNEL_SECRET || process.env.CHANNEL_SECRET || '';
 const BASE_URL   = (process.env.BASE_URL || '').replace(/\/$/, '');
 const STORE_NAME = process.env.STORE_NAME || '久礼大正町市場';
+const LINE_ADD_FRIEND_URL = process.env.LINE_ADD_FRIEND_URL || '';
+const LINE_OFFICIAL_ID    = process.env.LINE_OFFICIAL_ID || '';  // 例: @abcd1234
+const ADMIN_USER_ID       = process.env.ADMIN_USER_ID || '';
 
 // ══════════════════════════════════════════
 //  LINE Bot SDK（v7 / v8+ 両対応）
@@ -66,11 +69,14 @@ db.exec(`CREATE TABLE IF NOT EXISTS tickets (
   people      INTEGER DEFAULT 1,
   status      TEXT DEFAULT 'waiting',
   line_user_id TEXT,
+  link_token  TEXT DEFAULT '',
   created_at  TEXT DEFAULT (datetime('now','localtime'))
 )`);
+// link_token カラムが無い既存DBへの互換対応
+try { db.exec("ALTER TABLE tickets ADD COLUMN link_token TEXT DEFAULT ''"); } catch (_) {}
 
 const Q = {
-  insert:    db.prepare('INSERT INTO tickets (name, phone, people) VALUES (?, ?, ?)'),
+  insert:    db.prepare('INSERT INTO tickets (name, phone, people, link_token) VALUES (?, ?, ?, ?)'),
   get:       db.prepare('SELECT * FROM tickets WHERE id = ?'),
   setStatus: db.prepare('UPDATE tickets SET status = ? WHERE id = ?'),
   linkLine:  db.prepare('UPDATE tickets SET line_user_id = ? WHERE id = ?'),
@@ -164,9 +170,31 @@ app.post('/register', (req, res) => {
   const people = Math.min(Math.max(parseInt(req.body.people, 10) || 1, 1), 20);
   if (!name) return res.redirect('/form');
 
-  const info = Q.insert.run(name, phone, people);
+  // linkToken: ランダム16文字 hex（先頭8文字を tokenShort として使う）
+  const linkToken = crypto.randomBytes(8).toString('hex');
+  const tokenShort = linkToken.substring(0, 8);
+
+  const info = Q.insert.run(name, phone, people, linkToken);
   const id   = Number(info.lastInsertRowid);
   const pos  = Q.cntWait.get().c;
+
+  // oaMessage リンク生成: ボタン1タップで定型文がLINEトーク画面に入る
+  const linkMsg = `連携 ${id} ${tokenShort}`;
+  const oaId = LINE_OFFICIAL_ID.replace(/^@/, '');
+  const oaMessageUrl = oaId
+    ? `https://line.me/R/oaMessage/${encodeURIComponent('@' + oaId)}/?${encodeURIComponent(linkMsg)}`
+    : '';
+
+  // 友だち追加ボタン
+  const addFriendBtn = LINE_ADD_FRIEND_URL
+    ? `<a href="${LINE_ADD_FRIEND_URL}" class="lbtn lbtn-add" target="_blank">1. 友だち追加する</a>`
+    : `<p style="color:#666;font-size:.9em">1. LINE公式アカウント <b>${LINE_OFFICIAL_ID || '(未設定)'}</b> を友だち追加</p>`;
+
+  // 連携ボタン
+  const linkBtn = oaMessageUrl
+    ? `<a href="${oaMessageUrl}" class="lbtn lbtn-link">2. LINE通知を連携する</a>
+       <p style="color:#888;font-size:.75em;margin-top:4px">タップ → LINEが開く → 送信ボタンを押すだけ！</p>`
+    : `<p style="color:#666;font-size:.9em">2. LINEで <b>「${linkMsg}」</b> と送信</p>`;
 
   res.send(layout('受付完了', `
 <div class="card" style="text-align:center">
@@ -184,12 +212,14 @@ app.post('/register', (req, res) => {
   <div id="ca" style="display:none;background:#06c755;color:#fff;border-radius:12px;padding:20px;margin:16px 0;font-weight:bold;font-size:1.1em;line-height:1.6">
     順番きたで！<br>お店に来てや〜！
   </div>
-  <div style="background:#fff8e1;border:2px solid #ffe082;border-radius:12px;padding:16px;margin-top:20px;text-align:left;line-height:1.8">
-    <p style="font-weight:bold;color:#f57f17;margin-bottom:6px">LINE通知を受けるには</p>
-    <p>1. LINE公式アカウントを友だち追加</p>
-    <p>2. トークで <b style="color:#06c755">「受付 ${id}」</b> と送信</p>
-    <p>3. 順番が来たらLINEでお知らせ！</p>
+
+  <div style="background:#e8f5e9;border:2px solid #a5d6a7;border-radius:12px;padding:20px;margin-top:20px;text-align:center">
+    <p style="font-weight:bold;color:#2e7d32;margin-bottom:14px;font-size:1em">LINE通知を受け取る（入力なし・ボタンだけ！）</p>
+    ${addFriendBtn}
+    <div style="margin-top:12px">${linkBtn}</div>
+    <p style="color:#999;font-size:.7em;margin-top:12px">順番が来たらLINEでお知らせするき！</p>
   </div>
+
   <p style="color:#aaa;font-size:.75em;margin-top:14px" id="upd">10秒ごとに自動更新中...</p>
 </div>
 <script>
@@ -207,7 +237,12 @@ app.post('/register', (req, res) => {
     }).catch(function(){});
   },10000);
 })();
-</script>`));
+</script>`,
+`.lbtn{display:block;width:100%;padding:14px;border-radius:10px;font-size:1em;font-weight:bold;text-align:center;text-decoration:none;color:#fff}
+.lbtn-add{background:#06c755}
+.lbtn-add:active{background:#05a648}
+.lbtn-link{background:#4a90d9}
+.lbtn-link:active{background:#3a7bc0}`));
 });
 
 // ══════════════════════════════════════════
@@ -379,6 +414,10 @@ app.post('/call/:id', async (req, res) => {
 
   if (t.line_user_id) {
     await pushMsg(t.line_user_id, `順番きたき、7分以内に来てや〜！ 受付番号：${id}`);
+  } else if (ADMIN_USER_ID) {
+    // LINE未連携 → 管理者に電話依頼
+    const phoneInfo = t.phone ? `\n📞 ${t.phone}` : '\n📞 電話番号なし';
+    await pushMsg(ADMIN_USER_ID, `⚠️ No:${id} ${t.name}さんはLINE未連携やき、電話で呼んでや〜${phoneInfo}`);
   }
   res.json({ ok: true, message: `${t.name}さんを呼び出しました` });
 });
@@ -459,7 +498,41 @@ async function handleLineEvent(event) {
   const userId     = event.source.userId;
   const replyToken = event.replyToken;
 
-  // ── 「受付 123」で紐付け ──
+  // ── 「連携 {id} {tokenShort}」でトークン検証付き紐付け（oaMessageボタン用） ──
+  const linkMatch = text.match(/^連携\s+(\d+)\s+([a-f0-9]+)$/i);
+  if (linkMatch) {
+    const id = parseInt(linkMatch[1], 10);
+    const tokenInput = linkMatch[2].toLowerCase();
+    const t = Q.get.get(id);
+
+    if (!t) {
+      return replyMsg(replyToken, `受付番号 ${id} は見つからんかったで。番号を確認してや〜`);
+    }
+    if (t.status === 'done') {
+      return replyMsg(replyToken, `受付番号 ${id} はもう完了しちゅうで！`);
+    }
+    if (t.line_user_id) {
+      return replyMsg(replyToken, `受付番号 ${id} はもうLINE連携済みやき！順番が来たらお知らせするき待っちょってや〜`);
+    }
+    // linkToken の先頭が一致するか検証
+    if (!t.link_token || !t.link_token.startsWith(tokenInput)) {
+      return replyMsg(replyToken, `連携コードが合わんかったで。受付画面のボタンからもう一回やってみてや〜`);
+    }
+
+    Q.linkLine.run(userId, id);
+    const pos = Q.position.get(id).p + 1;
+
+    // 管理者にも通知
+    if (ADMIN_USER_ID) {
+      pushMsg(ADMIN_USER_ID, `🔗 No:${id}（${t.name}さん）がLINE連携完了`).catch(() => {});
+    }
+
+    return replyMsg(replyToken,
+      `連携完了やき！受付番号 ${id}（${t.name}さん）\n現在 ${pos}番目。順番が近づいたら通知するきね〜`
+    );
+  }
+
+  // ── 「受付 123」で紐付け（手入力フォールバック） ──
   const match = text.match(/^受付\s*(\d+)$/);
   if (match) {
     const id = parseInt(match[1], 10);
@@ -477,6 +550,11 @@ async function handleLineEvent(event) {
 
     Q.linkLine.run(userId, id);
     const pos = Q.position.get(id).p + 1;
+
+    if (ADMIN_USER_ID) {
+      pushMsg(ADMIN_USER_ID, `🔗 No:${id}（${t.name}さん）がLINE連携完了`).catch(() => {});
+    }
+
     return replyMsg(replyToken,
       `受付番号 ${id}（${t.name}さん）にLINE通知を紐付けたで！\n現在 ${pos}番目やき、順番が来たらここにお知らせするき待っちょってや〜`
     );

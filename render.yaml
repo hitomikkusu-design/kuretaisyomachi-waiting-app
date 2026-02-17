@@ -23,3 +23,5 @@ services:
         sync: false
       - key: LINE_CHANNEL_SECRET
         sync: false
+      - key: LINE_OFFICIAL_ID
+        sync: false
