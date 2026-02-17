@@ -200,16 +200,116 @@ h1{color:#06c755;font-size:1.3em;margin-bottom:16px}
 .info{font-size:1.1em;color:#333;margin-bottom:8px}
 .position{font-size:2.5em;font-weight:bold;color:#06c755;margin:16px 0}
 .note{color:#999;font-size:0.85em;margin-top:20px;line-height:1.6}
+.called{display:none;background:#06c755;color:#fff;border-radius:12px;padding:20px;margin-top:16px;font-size:1.1em;font-weight:bold;line-height:1.6}
+.called.show{display:block}
+.updating{color:#aaa;font-size:0.75em;margin-top:12px}
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="check">✅</div>
-  <h1>受付完了しました</h1>
+  <div class="check" id="icon">✅</div>
+  <h1 id="title">受付完了しました</h1>
   <p class="info">${name}さん（${party}名）</p>
-  <p>あなたの順番</p>
-  <div class="position">${position}<span style="font-size:0.4em;color:#666">番目</span></div>
-  <p class="note">順番が近づきましたらお呼びします。<br>この画面を閉じても大丈夫です。</p>
+  <p id="label">あなたの順番</p>
+  <div class="position" id="pos">${position}<span style="font-size:0.4em;color:#666">番目</span></div>
+  <div class="called" id="called">順番が来ました！<br>お店にお越しください</div>
+  <p class="note" id="note">順番が近づきましたらこの画面でお知らせします。<br>このページを開いたままお待ちください。</p>
+  <p class="updating" id="updating">自動更新中...</p>
+</div>
+<script>
+(function(){
+  var id = "${entry.id}";
+  var timer = setInterval(function(){
+    fetch("/api/position/" + id)
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(d.called){
+          document.getElementById("icon").textContent = "🎉";
+          document.getElementById("title").textContent = "順番です！";
+          document.getElementById("label").style.display = "none";
+          document.getElementById("pos").style.display = "none";
+          document.getElementById("called").classList.add("show");
+          document.getElementById("note").style.display = "none";
+          document.getElementById("updating").textContent = "";
+          clearInterval(timer);
+        } else {
+          document.getElementById("pos").innerHTML = d.position + '<span style="font-size:0.4em;color:#666">番目</span>';
+        }
+      })
+      .catch(function(){});
+  }, 10000);
+})();
+</script>
+</body>
+</html>`;
+  res.send(html);
+});
+
+// ── 順番確認API（フォーム受付者向け） ──
+app.get('/api/position/:id', (req, res) => {
+  const id = req.params.id;
+  const index = queue.findIndex((e) => e.id === id);
+  if (index === -1) {
+    return res.json({ found: false, position: 0, total: queue.length, called: true });
+  }
+  res.json({ found: true, position: index + 1, total: queue.length, called: false });
+});
+
+// ── 店頭用QRコード表示ページ ──
+app.get('/admin/qr', (req, res) => {
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  const formUrl = `${protocol}://${host}/form`;
+  const statusUrl = `${protocol}://${host}/status`;
+  const qrApi = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(formUrl)}`;
+
+  const html = `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${STORE_NAME} - 店頭用QRコード</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;background:#fff;min-height:100vh;display:flex;justify-content:center;align-items:flex-start;padding:20px}
+.page{text-align:center;max-width:500px;width:100%}
+h1{font-size:2em;color:#06c755;margin-bottom:8px}
+.subtitle{font-size:1.2em;color:#333;margin-bottom:24px}
+.qr-box{background:#fff;border:3px solid #06c755;border-radius:16px;padding:24px;display:inline-block;margin-bottom:16px}
+.qr-box img{width:300px;height:300px}
+.instruction{background:#f8f9fa;border-radius:12px;padding:20px;margin:16px 0;text-align:left;font-size:1.05em;line-height:2}
+.instruction .step{display:flex;align-items:flex-start;gap:8px}
+.instruction .num{background:#06c755;color:#fff;border-radius:50%;min-width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:0.9em}
+.url{color:#999;font-size:0.8em;word-break:break-all;margin-top:8px}
+.print-btn{display:inline-block;padding:12px 32px;background:#06c755;color:#fff;border:none;border-radius:8px;font-size:1em;cursor:pointer;margin-top:16px;text-decoration:none}
+.print-btn:active{background:#05a648}
+.status-qr{margin-top:32px;padding-top:24px;border-top:2px dashed #ddd}
+.status-qr h2{font-size:1.2em;color:#333;margin-bottom:12px}
+.status-qr img{width:200px;height:200px}
+.status-qr .label{color:#666;font-size:0.9em;margin-top:4px}
+@media print{.print-btn{display:none} body{padding:0} .page{max-width:100%}}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>${STORE_NAME}</h1>
+  <p class="subtitle">順番待ち受付</p>
+  <div class="qr-box">
+    <img src="${qrApi}" alt="受付QRコード">
+  </div>
+  <div class="instruction">
+    <div class="step"><span class="num">1</span><span>上のQRコードをスマホで読み取り</span></div>
+    <div class="step"><span class="num">2</span><span>LINE友だち追加 → 「受付 名前 人数」送信</span></div>
+    <div class="step"><span class="num">3</span><span>順番が来たらLINEでお知らせします！</span></div>
+  </div>
+  <p class="url">${formUrl}</p>
+  <button class="print-btn" onclick="window.print()">このページを印刷する</button>
+
+  <div class="status-qr">
+    <h2>待ち状況の確認はこちら</h2>
+    <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(statusUrl)}" alt="状況確認QRコード">
+    <p class="label">待ち組数をリアルタイムで確認できます</p>
+  </div>
 </div>
 </body>
 </html>`;
@@ -416,6 +516,7 @@ app.listen(PORT, () => {
   console.log(`受付フォーム: /form`);
   console.log(`待ち状況: /status`);
   console.log(`Webhook: /webhook`);
+  console.log(`店頭用QR: /admin/qr`);
   console.log(`管理者ID: ${ADMIN_USER_ID ? '設定済み' : '未設定'}`);
   console.log(`トークン: ${CHANNEL_ACCESS_TOKEN ? '設定済み' : '未設定'}`);
   console.log(`友だち追加URL: ${LINE_ADD_FRIEND_URL ? '設定済み' : '未設定'}`);
