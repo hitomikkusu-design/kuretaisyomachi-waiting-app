@@ -319,7 +319,7 @@ app.get('/admin', (_req, res) => {
 
   function callRow(t) {
     const ca = t.called_at || '';
-    const btns = `<button class="btn bo sm" onclick="act('done',${t.id})">完了</button> <button class="btn bg2 sm" onclick="act('requeue',${t.id})">戻す</button> <button class="btn br sm" onclick="act('delete',${t.id})">削除</button>`;
+    const btns = `<button class="btn bo sm" onclick="act('recall',${t.id})">再呼出</button> <button class="btn bo sm" onclick="act('done',${t.id})">完了</button> <button class="btn bg2 sm" onclick="act('requeue',${t.id})">戻す</button>`;
     const skipBtn = `<button class="btn br sm skip-btn" onclick="act('skip',${t.id})" style="display:none" data-skip-id="${t.id}">飛ばす</button>`;
     return `<tr data-called-at="${ca}" data-id="${t.id}"><td><b>#${t.id}</b></td><td>${t.name}</td><td>${t.phone||'-'}</td><td>${t.people}名</td><td class="timer-cell">--:--</td><td>${btns} ${skipBtn}</td></tr>`;
   }
@@ -356,9 +356,10 @@ app.get('/admin', (_req, res) => {
 async function act(a,id){
   if(a==='delete'&&!confirm('削除しますか？'))return;
   if(a==='skip'&&!confirm('飛ばしますか？'))return;
-  var r=await fetch('/'+a+'/'+id,{method:'POST'});
+  var route=a==='recall'?'call':a;
+  var r=await fetch('/'+route+'/'+id,{method:'POST'});
   var d=await r.json();
-  if(a==='call'&&d.success)alert('呼び出しました');
+  if((a==='call'||a==='recall')&&d.success)alert('呼び出しました');
   location.reload();
 }
 var LIMIT=7*60*1000;
@@ -463,12 +464,12 @@ app.post('/call/:id', async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const t  = Q.get.get(id);
   if (!t) return res.status(404).json({ success: false, message: '受付番号が見つかりません' });
-  if (t.status !== 'waiting') return res.status(400).json({ success: false, message: `状態が ${t.status} です` });
+  if (t.status !== 'waiting' && t.status !== 'called') return res.status(400).json({ success: false, message: `状態が ${t.status} です` });
 
   const now = new Date().toISOString();
   Q.setCalled.run(now, id);
 
-  const callMsg = `大正町市場やき！\n\n${id}番のお客さん、順番きたで〜！\n7分以内に戻ってきてや。\n\n来んかったら次に回すきね。`;
+  const callMsg = `大正町市場やき！\n${id}番のお客さん、順番きたで〜！\n7分以内に戻ってきてや。\n来んかったら次に回すきね。`;
 
   // 管理者へLINE通知
   if (ADMIN_USER_ID) {
