@@ -17,6 +17,7 @@ const STORE_NAME = process.env.STORE_NAME || '久礼大正町市場';
 const LINE_ADD_FRIEND_URL = process.env.LINE_ADD_FRIEND_URL || '';
 const LINE_OFFICIAL_ID    = process.env.LINE_OFFICIAL_ID || '';  // 例: @abcd1234
 const ADMIN_USER_ID       = process.env.ADMIN_USER_ID || '';
+const ENABLE_CUSTOMER_PUSH = process.env.ENABLE_CUSTOMER_PUSH === 'true'; // デフォルト false
 
 // ══════════════════════════════════════════
 //  LINE Bot SDK（v7 / v8+ 両対応）
@@ -38,13 +39,21 @@ try {
 }
 
 async function pushMsg(userId, text) {
-  if (!lineClient) return;
+  if (!lineClient) { console.log('[LINE push] lineClient未初期化'); return; }
+  if (!userId) { console.log('[LINE push] userId未指定'); return; }
   const m = [{ type: 'text', text }];
   try {
     sdkNew
       ? await lineClient.pushMessage({ to: userId, messages: m })
       : await lineClient.pushMessage(userId, m);
-  } catch (e) { console.error('[LINE push]', e.message); }
+    console.log('[LINE push OK] to=' + userId.substring(0, 8) + '...');
+  } catch (e) {
+    console.error('[LINE push ERROR]', {
+      statusCode: e.statusCode || e.status || '?',
+      message: e.message,
+      data: e.body || e.originalError?.response?.data || ''
+    });
+  }
 }
 
 async function replyMsg(token, text) {
@@ -178,23 +187,39 @@ app.post('/register', (req, res) => {
   const id   = Number(info.lastInsertRowid);
   const pos  = Q.cntWait.get().c;
 
-  // oaMessage リンク生成: ボタン1タップで定型文がLINEトーク画面に入る
-  const linkMsg = `連携 ${id} ${tokenShort}`;
-  const oaId = LINE_OFFICIAL_ID.replace(/^@/, '');
-  const oaMessageUrl = oaId
-    ? `https://line.me/R/oaMessage/${encodeURIComponent('@' + oaId)}/?${encodeURIComponent(linkMsg)}`
-    : '';
+  // ── 管理者へ push 通知（常に送る） ──
+  if (ADMIN_USER_ID) {
+    const adminBase = BASE_URL || '(BASE_URL未設定)';
+    pushMsg(ADMIN_USER_ID,
+      `【新規受付】No:${id}\n名前：${name}\n人数：${people}\n電話：${phone || 'なし'}\n管理画面：${adminBase}/admin`
+    ).catch(() => {});
+  }
 
-  // 友だち追加ボタン
-  const addFriendBtn = LINE_ADD_FRIEND_URL
-    ? `<a href="${LINE_ADD_FRIEND_URL}" class="lbtn lbtn-add" target="_blank">1. 友だち追加する</a>`
-    : `<p style="color:#666;font-size:.9em">1. LINE公式アカウント <b>${LINE_OFFICIAL_ID || '(未設定)'}</b> を友だち追加</p>`;
-
-  // 連携ボタン
-  const linkBtn = oaMessageUrl
-    ? `<a href="${oaMessageUrl}" class="lbtn lbtn-link">2. LINE通知を連携する</a>
-       <p style="color:#888;font-size:.75em;margin-top:4px">タップ → LINEが開く → 送信ボタンを押すだけ！</p>`
-    : `<p style="color:#666;font-size:.9em">2. LINEで <b>「${linkMsg}」</b> と送信</p>`;
+  // ── LINE連携セクション（ENABLE_CUSTOMER_PUSH で切替） ──
+  let lineSection = '';
+  if (ENABLE_CUSTOMER_PUSH) {
+    const linkMsg = `連携 ${id} ${tokenShort}`;
+    const oaId = LINE_OFFICIAL_ID.replace(/^@/, '');
+    const oaMessageUrl = oaId
+      ? `https://line.me/R/oaMessage/${encodeURIComponent('@' + oaId)}/?${encodeURIComponent(linkMsg)}`
+      : '';
+    const addFriendBtn = LINE_ADD_FRIEND_URL
+      ? `<a href="${LINE_ADD_FRIEND_URL}" class="lbtn lbtn-add" target="_blank">1. 友だち追加する</a>`
+      : `<p style="color:#666;font-size:.9em">1. LINE公式アカウント <b>${LINE_OFFICIAL_ID || '(未設定)'}</b> を友だち追加</p>`;
+    const linkBtn = oaMessageUrl
+      ? `<a href="${oaMessageUrl}" class="lbtn lbtn-link">2. LINE通知を連携する</a>
+         <p style="color:#888;font-size:.75em;margin-top:4px">タップ → LINEが開く → 送信ボタンを押すだけ！</p>`
+      : `<p style="color:#666;font-size:.9em">2. LINEで <b>「${linkMsg}」</b> と送信</p>`;
+    lineSection = `
+    <div style="background:#e8f5e9;border:2px solid #a5d6a7;border-radius:12px;padding:20px;margin-top:20px;text-align:center">
+      <p style="font-weight:bold;color:#2e7d32;margin-bottom:14px;font-size:1em">LINE通知を受け取る（入力なし・ボタンだけ！）</p>
+      ${addFriendBtn}
+      <div style="margin-top:12px">${linkBtn}</div>
+      <p style="color:#999;font-size:.7em;margin-top:12px">順番が来たらLINEでお知らせするき！</p>
+    </div>`;
+  } else {
+    lineSection = `<p style="color:#888;font-size:.9em;margin-top:20px;line-height:1.6">お店の近くでお待ちください。<br>順番が来たらお呼びします。</p>`;
+  }
 
   res.send(layout('受付完了', `
 <div class="card" style="text-align:center">
@@ -212,14 +237,7 @@ app.post('/register', (req, res) => {
   <div id="ca" style="display:none;background:#06c755;color:#fff;border-radius:12px;padding:20px;margin:16px 0;font-weight:bold;font-size:1.1em;line-height:1.6">
     順番きたで！<br>お店に来てや〜！
   </div>
-
-  <div style="background:#e8f5e9;border:2px solid #a5d6a7;border-radius:12px;padding:20px;margin-top:20px;text-align:center">
-    <p style="font-weight:bold;color:#2e7d32;margin-bottom:14px;font-size:1em">LINE通知を受け取る（入力なし・ボタンだけ！）</p>
-    ${addFriendBtn}
-    <div style="margin-top:12px">${linkBtn}</div>
-    <p style="color:#999;font-size:.7em;margin-top:12px">順番が来たらLINEでお知らせするき！</p>
-  </div>
-
+  ${lineSection}
   <p style="color:#aaa;font-size:.75em;margin-top:14px" id="upd">10秒ごとに自動更新中...</p>
 </div>
 <script>
@@ -412,12 +430,13 @@ app.post('/call/:id', async (req, res) => {
 
   Q.setStatus.run('called', id);
 
-  if (t.line_user_id) {
+  if (ENABLE_CUSTOMER_PUSH && t.line_user_id) {
+    // お客様へ直接通知（ENABLE_CUSTOMER_PUSH=true かつ LINE連携済み）
     await pushMsg(t.line_user_id, `順番きたき、7分以内に来てや〜！ 受付番号：${id}`);
   } else if (ADMIN_USER_ID) {
-    // LINE未連携 → 管理者に電話依頼
+    // 管理者に電話依頼（お客様pushが無効 or LINE未連携）
     const phoneInfo = t.phone ? `\n📞 ${t.phone}` : '\n📞 電話番号なし';
-    await pushMsg(ADMIN_USER_ID, `⚠️ No:${id} ${t.name}さんはLINE未連携やき、電話で呼んでや〜${phoneInfo}`);
+    await pushMsg(ADMIN_USER_ID, `⚠️ No:${id} ${t.name}さんを呼んでや〜${phoneInfo}`);
   }
   res.json({ ok: true, message: `${t.name}さんを呼び出しました` });
 });
@@ -492,14 +511,23 @@ app.post('/webhook', (req, res) => {
 });
 
 async function handleLineEvent(event) {
+  // ── 全イベントで userId をログ出力（ADMIN_USER_ID 特定用） ──
+  console.log('[LINE] userId=', event.source?.userId);
+
   if (event.type !== 'message' || event.message.type !== 'text') return;
 
   const text       = event.message.text.trim();
   const userId     = event.source.userId;
   const replyToken = event.replyToken;
 
-  // ── 「連携 {id} {tokenShort}」でトークン検証付き紐付け（oaMessageボタン用） ──
+  // ── 連携コマンド（ENABLE_CUSTOMER_PUSH=false なら無効） ──
   const linkMatch = text.match(/^連携\s+(\d+)\s+([a-f0-9]+)$/i);
+  const legacyMatch = !linkMatch && text.match(/^受付\s*(\d+)$/);
+  if ((linkMatch || legacyMatch) && !ENABLE_CUSTOMER_PUSH) {
+    return replyMsg(replyToken, `現在LINE連携は準備中やき。お店でお待ちくださいね〜`);
+  }
+
+  // ── 「連携 {id} {tokenShort}」でトークン検証付き紐付け（oaMessageボタン用） ──
   if (linkMatch) {
     const id = parseInt(linkMatch[1], 10);
     const tokenInput = linkMatch[2].toLowerCase();
@@ -585,10 +613,12 @@ async function handleLineEvent(event) {
 //  サーバー起動
 // ══════════════════════════════════════════
 app.listen(PORT, () => {
-  console.log(`=== ${STORE_NAME} 順番待ちシステム v4 ===`);
-  console.log(`PORT      : ${PORT}`);
-  console.log(`BASE_URL  : ${BASE_URL || '(自動検出)'}`);
-  console.log(`LINE SDK  : ${lineClient ? 'OK' : '未設定'}`);
-  console.log(`Routes    : / /form /status /admin /admin/qr /webhook`);
+  console.log(`=== ${STORE_NAME} 順番待ちシステム v5 ===`);
+  console.log(`PORT             : ${PORT}`);
+  console.log(`BASE_URL         : ${BASE_URL || '(自動検出)'}`);
+  console.log(`LINE SDK         : ${lineClient ? 'OK' : '未設定'}`);
+  console.log(`ADMIN_USER_ID    : ${ADMIN_USER_ID ? ADMIN_USER_ID.substring(0, 8) + '...' : '未設定'}`);
+  console.log(`CUSTOMER_PUSH    : ${ENABLE_CUSTOMER_PUSH ? 'ON' : 'OFF'}`);
+  console.log(`Routes           : / /form /status /admin /admin/qr /webhook`);
   console.log('==========================================');
 });
