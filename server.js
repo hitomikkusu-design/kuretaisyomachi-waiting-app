@@ -98,6 +98,29 @@ const Q = {
   position:  db.prepare("SELECT COUNT(*) as p FROM tickets WHERE status='waiting' AND id < ?"),
   byLineUsr: db.prepare("SELECT * FROM tickets WHERE line_user_id=? AND status IN('waiting','called') ORDER BY id LIMIT 1"),
   clearDone: db.prepare("DELETE FROM tickets WHERE status='done'"),
+  // 分析用クエリ
+  dailyCounts: db.prepare(`
+    SELECT date(created_at) as day, COUNT(*) as groups, SUM(people) as total_people
+    FROM tickets GROUP BY date(created_at) ORDER BY day DESC LIMIT 30
+  `),
+  hourlyDist: db.prepare(`
+    SELECT strftime('%H',created_at) as hour, COUNT(*) as cnt
+    FROM tickets GROUP BY hour ORDER BY hour
+  `),
+  avgWaitTime: db.prepare(`
+    SELECT ROUND(AVG((julianday(called_at)-julianday(created_at))*24*60),1) as avg_min
+    FROM tickets WHERE called_at IS NOT NULL AND called_at != '' AND status IN('called','done')
+  `),
+  statusSummary: db.prepare(`
+    SELECT status, COUNT(*) as cnt FROM tickets GROUP BY status
+  `),
+  avgPeoplePerGroup: db.prepare(`
+    SELECT ROUND(AVG(people),1) as avg_people FROM tickets
+  `),
+  peakDay: db.prepare(`
+    SELECT strftime('%w',created_at) as dow, COUNT(*) as cnt
+    FROM tickets GROUP BY dow ORDER BY dow
+  `),
 };
 
 // ══════════════════════════════════════════
@@ -350,7 +373,8 @@ app.get('/admin', (_req, res) => {
 </div>
 <div style="text-align:center;margin-top:8px">
   <a href="/admin/qr" class="btn bg" style="margin-right:6px">QR表示</a>
-  <a href="/status" class="btn bg2">待ち状況</a>
+  <a href="/status" class="btn bg2" style="margin-right:6px">待ち状況</a>
+  <a href="/admin/analytics" class="btn" style="background:#4a90d9">トレンド分析</a>
 </div>
 <script>
 async function act(a,id){
@@ -662,6 +686,126 @@ async function handleLineEvent(event) {
 }
 
 // ══════════════════════════════════════════
+//  GET /admin/analytics ── ビジネストレンド分析
+// ══════════════════════════════════════════
+app.get('/admin/analytics', (_req, res) => {
+  const daily      = Q.dailyCounts.all();
+  const hourly     = Q.hourlyDist.all();
+  const waitResult = Q.avgWaitTime.get();
+  const statusRows = Q.statusSummary.all();
+  const avgPeople  = Q.avgPeoplePerGroup.get();
+  const peakDays   = Q.peakDay.all();
+
+  const avgWait = waitResult?.avg_min ?? null;
+  const DOW_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
+
+  // 合計数
+  let totalGroups = 0, totalPeople = 0;
+  statusRows.forEach(r => {
+    totalGroups += r.cnt;
+    // people の合計は daily から
+  });
+  daily.forEach(r => { totalPeople += r.total_people || 0; });
+  totalGroups = daily.reduce((s, r) => s + r.groups, 0);
+
+  // 時間帯バーチャート（最大値で正規化）
+  const maxHour = Math.max(...hourly.map(h => h.cnt), 1);
+  const hourBars = Array.from({length: 24}, (_, i) => {
+    const h = hourly.find(x => parseInt(x.hour) === i);
+    const cnt = h ? h.cnt : 0;
+    const pct = Math.round(cnt / maxHour * 100);
+    const color = cnt === maxHour && cnt > 0 ? '#ff9800' : '#06c755';
+    return `<div class="hb-col">
+      <div class="hb-bar" style="height:${pct}%;background:${color}" title="${i}時: ${cnt}組"></div>
+      <div class="hb-lbl">${i % 3 === 0 ? i : ''}</div>
+    </div>`;
+  }).join('');
+
+  // 曜日バーチャート
+  const maxDow = Math.max(...peakDays.map(d => d.cnt), 1);
+  const dowBars = DOW_LABELS.map((label, i) => {
+    const d = peakDays.find(x => parseInt(x.dow) === i);
+    const cnt = d ? d.cnt : 0;
+    const pct = Math.round(cnt / maxDow * 100);
+    const color = cnt === maxDow && cnt > 0 ? '#e53935' : '#4a90d9';
+    return `<div class="hb-col">
+      <div class="hb-bar" style="height:${pct}%;background:${color}" title="${label}: ${cnt}組"></div>
+      <div class="hb-lbl">${label}</div>
+    </div>`;
+  }).join('');
+
+  // 直近30日テーブル
+  const dailyRows = daily.map(r => `
+    <tr>
+      <td>${r.day}</td>
+      <td style="text-align:right;font-weight:bold">${r.groups}</td>
+      <td style="text-align:right">${r.total_people || 0}</td>
+    </tr>`).join('') || '<tr><td colspan="3" style="text-align:center;color:#aaa">データなし</td></tr>';
+
+  res.send(layout(`${STORE_NAME} トレンド分析`, `
+<div class="card">
+  <h1 style="color:#06c755;font-size:1.2em;margin-bottom:14px">${STORE_NAME} ビジネストレンド分析</h1>
+
+  <!-- サマリーカード -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px">
+    <div class="stat-box">
+      <div class="stat-num" style="color:#06c755">${totalGroups}</div>
+      <div class="stat-lbl">累計グループ数</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-num" style="color:#4a90d9">${totalPeople}</div>
+      <div class="stat-lbl">累計来店人数</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-num" style="color:#ff9800">${avgWait !== null ? avgWait + '分' : '-'}</div>
+      <div class="stat-lbl">平均待ち時間</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-num" style="color:#9c27b0">${avgPeople?.avg_people ?? '-'}名</div>
+      <div class="stat-lbl">平均グループ人数</div>
+    </div>
+  </div>
+
+  <!-- 時間帯分布 -->
+  <h2 class="sh">時間帯別来店分布</h2>
+  <div class="chart-wrap">
+    <div class="hb-chart">${hourBars}</div>
+    <p style="color:#aaa;font-size:.75em;text-align:center;margin-top:4px">時（0〜23時）</p>
+  </div>
+
+  <!-- 曜日分布 -->
+  <h2 class="sh" style="margin-top:16px">曜日別来店分布</h2>
+  <div class="chart-wrap">
+    <div class="hb-chart" style="height:120px">${dowBars}</div>
+  </div>
+
+  <!-- 直近30日 -->
+  <h2 class="sh" style="margin-top:16px">日別来店数（直近30日）</h2>
+  <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse;font-size:.85em">
+      <tr><th>日付</th><th style="text-align:right">グループ数</th><th style="text-align:right">人数</th></tr>
+      ${dailyRows}
+    </table>
+  </div>
+
+  <div style="text-align:center;margin-top:18px">
+    <a href="/admin" class="btn bg2">← 管理画面に戻る</a>
+  </div>
+</div>`,
+`.stat-box{background:#f8f9fa;border-radius:10px;padding:14px;text-align:center}
+.stat-num{font-size:1.8em;font-weight:bold}
+.stat-lbl{font-size:.78em;color:#888;margin-top:2px}
+.sh{font-size:1em;color:#333;margin-bottom:8px}
+.chart-wrap{background:#f8f9fa;border-radius:10px;padding:12px}
+.hb-chart{display:flex;align-items:flex-end;height:100px;gap:3px}
+.hb-col{flex:1;display:flex;flex-direction:column;align-items:center;height:100%}
+.hb-bar{width:100%;min-height:2px;border-radius:2px 2px 0 0;transition:height .3s}
+.hb-lbl{font-size:.65em;color:#888;margin-top:2px;white-space:nowrap}
+th{background:#f0f0f0;padding:7px 8px;text-align:left;font-size:.8em;color:#555}
+td{padding:6px 8px;border-bottom:1px solid #f0f0f0}`));
+});
+
+// ══════════════════════════════════════════
 //  サーバー起動
 // ══════════════════════════════════════════
 app.listen(PORT, () => {
@@ -671,6 +815,6 @@ app.listen(PORT, () => {
   console.log(`LINE SDK         : ${lineClient ? 'OK' : '未設定'}`);
   console.log(`ADMIN_USER_ID    : ${ADMIN_USER_ID ? ADMIN_USER_ID.substring(0, 8) + '...' : '未設定'}`);
   console.log(`CUSTOMER_PUSH    : ${ENABLE_CUSTOMER_PUSH ? 'ON' : 'OFF'}`);
-  console.log(`Routes           : / /form /status /admin /admin/qr /webhook`);
+  console.log(`Routes           : / /form /status /admin /admin/qr /admin/analytics /webhook`);
   console.log('==========================================');
 });
