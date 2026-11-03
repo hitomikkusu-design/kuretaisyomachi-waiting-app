@@ -17,7 +17,11 @@ const STORE_NAME = process.env.STORE_NAME || '久礼大正町市場';
 const LINE_ADD_FRIEND_URL = process.env.LINE_ADD_FRIEND_URL || '';
 const LINE_OFFICIAL_ID    = process.env.LINE_OFFICIAL_ID || '';  // 例: @abcd1234
 const ADMIN_USER_ID       = process.env.ADMIN_USER_ID || '';
-const ENABLE_CUSTOMER_PUSH = process.env.ENABLE_CUSTOMER_PUSH === 'true'; // デフォルト false
+// お客さんへのLINE通知：デフォルト ON。止めたい時だけ ENABLE_CUSTOMER_PUSH=false
+const ENABLE_CUSTOMER_PUSH = process.env.ENABLE_CUSTOMER_PUSH !== 'false';
+
+// 呼び出し後の猶予（7分）
+const CALL_LIMIT_MS = 7 * 60 * 1000;
 
 // ══════════════════════════════════════════
 //  LINE Bot SDK（v7 / v8+ 両対応）
@@ -37,6 +41,13 @@ try {
 } catch (e) {
   console.log('[LINE] SDK読込スキップ:', e.message);
 }
+
+// 公式アカウントID（@なし）と、友だち追加URL
+const OA_ID = LINE_OFFICIAL_ID.replace(/^@/, '').trim();
+const ADD_FRIEND_URL = LINE_ADD_FRIEND_URL
+  || (OA_ID ? `https://line.me/R/ti/p/${encodeURIComponent('@' + OA_ID)}` : '');
+// 受付後の画面に「LINEでも通知を受け取る」を出せるか
+const CUSTOMER_LINE_READY = ENABLE_CUSTOMER_PUSH && !!lineClient && !!(OA_ID || ADD_FRIEND_URL);
 
 async function pushMsg(userId, text) {
   if (!lineClient) { console.log('[LINE push] lineClient未初期化'); return; }
@@ -64,6 +75,11 @@ async function replyMsg(token, text) {
       ? await lineClient.replyMessage({ replyToken: token, messages: m })
       : await lineClient.replyMessage(token, m);
   } catch (e) { console.error('[LINE reply]', e.message); }
+}
+
+// 呼び出しの文面（LINE・受付後の画面で共通）
+function callMessage(id) {
+  return `大正町市場やき！\n${id}番のお客さん、順番きたで〜！\n7分以内に戻ってきてや。\n来んかったら次に回すきね。`;
 }
 
 // ══════════════════════════════════════════
@@ -118,6 +134,19 @@ function baseUrl(req) {
   const p = req.headers['x-forwarded-proto'] || req.protocol;
   const h = req.headers['x-forwarded-host'] || req.get('host');
   return `${p}://${h}`;
+}
+
+// HTML に入れる文字のエスケープ（名前などに < > が入っても画面が壊れんように）
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// 受付ページの合言葉（link_token）の照合
+function tokenOk(input, token) {
+  if (!token || typeof input !== 'string' || input.length !== token.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(input), Buffer.from(token));
 }
 
 // ══════════════════════════════════════════
@@ -212,13 +241,11 @@ app.post('/register', (req, res) => {
   const people = Math.min(Math.max(parseInt(req.body.people, 10) || 1, 1), 20);
   if (!name) return res.redirect('/form');
 
-  // linkToken: ランダム16文字 hex（先頭8文字を tokenShort として使う）
+  // linkToken: ランダム16文字 hex（受付ページの合言葉。先頭8文字をLINE連携コードに使う）
   const linkToken = crypto.randomBytes(8).toString('hex');
-  const tokenShort = linkToken.substring(0, 8);
 
   const info = Q.insert.run(name, phone, people, linkToken);
   const id   = Number(info.lastInsertRowid);
-  const pos  = Q.cntWait.get().c;
 
   // ── 管理者へ push 通知（常に送る） ──
   if (ADMIN_USER_ID) {
@@ -228,72 +255,285 @@ app.post('/register', (req, res) => {
     ).catch(() => {});
   }
 
-  // ── LINE連携セクション（ENABLE_CUSTOMER_PUSH で切替） ──
-  let lineSection = '';
-  if (ENABLE_CUSTOMER_PUSH) {
-    const linkMsg = `連携 ${id} ${tokenShort}`;
-    const oaId = LINE_OFFICIAL_ID.replace(/^@/, '');
-    const oaMessageUrl = oaId
-      ? `https://line.me/R/oaMessage/${encodeURIComponent('@' + oaId)}/?${encodeURIComponent(linkMsg)}`
-      : '';
-    const addFriendBtn = LINE_ADD_FRIEND_URL
-      ? `<a href="${LINE_ADD_FRIEND_URL}" class="lbtn lbtn-add" target="_blank">1. 友だち追加する</a>`
-      : `<p style="color:#666;font-size:.9em">1. LINE公式アカウント <b>${LINE_OFFICIAL_ID || '(未設定)'}</b> を友だち追加</p>`;
-    const linkBtn = oaMessageUrl
-      ? `<a href="${oaMessageUrl}" class="lbtn lbtn-link">2. LINE通知を連携する</a>
-         <p style="color:#888;font-size:.75em;margin-top:4px">タップ → LINEが開く → 送信ボタンを押すだけ！</p>`
-      : `<p style="color:#666;font-size:.9em">2. LINEで <b>「${linkMsg}」</b> と送信</p>`;
-    lineSection = `
-    <div style="background:#e8f5e9;border:2px solid #a5d6a7;border-radius:12px;padding:20px;margin-top:20px;text-align:center">
-      <p style="font-weight:bold;color:#2e7d32;margin-bottom:14px;font-size:1em">LINE通知を受け取る（入力なし・ボタンだけ！）</p>
-      ${addFriendBtn}
-      <div style="margin-top:12px">${linkBtn}</div>
-      <p style="color:#999;font-size:.7em;margin-top:12px">順番が来たらLINEでお知らせするき！</p>
-    </div>`;
-  } else {
-    lineSection = `<p style="color:#888;font-size:.9em;margin-top:20px;line-height:1.6">お店の近くでお待ちください。<br>順番が来たらお呼びします。</p>`;
+  // 受付後の画面へ移動（再読み込みしても二重受付にならず、閉じても開き直せる）
+  res.redirect(303, `/ticket/${id}?k=${linkToken}`);
+});
+
+// ══════════════════════════════════════════
+//  GET /ticket/:id ── 受付後の画面（呼び出しを待つ画面）
+// ══════════════════════════════════════════
+app.get('/ticket/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const t  = Number.isFinite(id) ? Q.get.get(id) : null;
+  if (!t || !tokenOk(String(req.query.k || ''), t.link_token)) {
+    return res.status(404).send(layout('受付が見つかりません', `
+<div class="card" style="text-align:center">
+  <h1 style="color:#888;font-size:1.2em;margin-bottom:10px">受付が見つからんかったで</h1>
+  <p style="color:#666;line-height:1.7">お手数やけど、お店の人に声をかけてや〜</p>
+  <a href="/form" class="btn bg" style="margin-top:16px">受付画面へ</a>
+</div>`));
   }
 
-  res.send(layout('受付完了', `
+  const pos = t.status === 'waiting' ? Q.position.get(id).p + 1 : 0;
+  const tokenShort = t.link_token.substring(0, 8);
+  const callHtml = callMessage(id).split('\n').map(esc).join('<br>');
+
+  // ── LINE連携セクション ──
+  let lineSection = '';
+  if (CUSTOMER_LINE_READY) {
+    const linkMsg = `連携 ${id} ${tokenShort}`;
+    const oaMessageUrl = OA_ID
+      ? `https://line.me/R/oaMessage/${encodeURIComponent('@' + OA_ID)}/?${encodeURIComponent(linkMsg)}`
+      : '';
+    const step1 = ADD_FRIEND_URL
+      ? `<a href="${esc(ADD_FRIEND_URL)}" class="lbtn lbtn-add" target="_blank" rel="noopener">① 友だち追加する</a>`
+      : '';
+    const step2 = oaMessageUrl
+      ? `<a href="${esc(oaMessageUrl)}" class="lbtn lbtn-link">② 連携メッセージを送る</a>
+         <p class="lnote">LINEが開いたら、そのまま送信ボタンを押すだけ！</p>`
+      : `<p class="lnote" style="font-size:.95em;color:#333">② LINEで <b>「${esc(linkMsg)}」</b> と送信してね</p>`;
+    lineSection = `
+<div class="card" id="line-box" style="text-align:center">
+  <div id="line-off">
+    <button type="button" class="lbtn lbtn-main" onclick="document.getElementById('line-steps').style.display='block';this.style.display='none'">LINEでも通知を受け取る</button>
+    <div id="line-steps" style="display:none">
+      <p style="font-weight:bold;color:#2e7d32;margin-bottom:12px">LINEでも通知を受け取る</p>
+      ${step1}
+      <div style="margin-top:10px">${step2}</div>
+      <p class="lnote">友だち追加したら、この画面に戻って②を押してや〜</p>
+    </div>
+  </div>
+  <div id="line-on" style="display:none;color:#2e7d32;font-weight:bold;line-height:1.7">
+    ✅ LINEとつながったで！<br><span style="font-weight:normal;color:#555;font-size:.9em">呼ばれたらLINEにもお知らせするき。</span>
+  </div>
+</div>`;
+  }
+
+  const init = {
+    status: t.status,
+    position: pos,
+    called_at: t.called_at || '',
+    linked: !!t.line_user_id,
+  };
+
+  res.send(layout(`受付番号 ${id}｜${STORE_NAME}`, `
+<div id="call-screen" class="card call-card" style="display:none">
+  <div class="call-icon">📣</div>
+  <div class="call-msg">${callHtml}</div>
+  <div class="call-timer-label" id="call-timer-label">残り時間</div>
+  <div class="call-timer" id="call-timer">07:00</div>
+  <button type="button" class="ack-btn" id="ack-btn" onclick="ack()">わかった！（音を止める）</button>
+</div>
+
 <div class="card" style="text-align:center">
-  <div style="font-size:3em;margin-bottom:8px">✅</div>
-  <h1 style="color:#06c755">受付できたで！</h1>
-  <p style="font-size:1.05em;color:#333;margin-top:12px">${name}さん（${people}名）</p>
+  <h1 style="color:#06c755" id="head">受付できたで！</h1>
+  <p style="font-size:1.05em;color:#333;margin-top:12px">${esc(t.name)}さん（${t.people}名）</p>
   <div style="margin:20px 0">
     <p style="color:#666;font-size:.85em">受付番号</p>
     <div style="font-size:3.5em;font-weight:bold;color:#06c755">${id}</div>
   </div>
   <div id="pa">
     <p style="color:#666;font-size:.85em">現在の順番</p>
-    <div style="font-size:2em;font-weight:bold"><span id="pos">${pos}</span><small style="color:#666"> 番目</small></div>
+    <div style="font-size:2em;font-weight:bold"><span id="pos">${pos || '-'}</span><small style="color:#666"> 番目</small></div>
   </div>
-  <div id="ca" style="display:none;background:#06c755;color:#fff;border-radius:12px;padding:20px;margin:16px 0;font-weight:bold;font-size:1.1em;line-height:1.6">
-    順番きたで！<br>お店に来てや〜！
-  </div>
-  ${lineSection}
+  <div id="end-area" style="display:none;color:#555;line-height:1.7;padding:12px 0"></div>
+  <p id="wait-note" style="color:#888;font-size:.9em;margin-top:16px;line-height:1.6">お店の近くでお待ちください。<br>順番が来たら<b>この画面が切り替わって</b>お知らせするき！<br><span style="font-size:.9em">この画面は閉じんと開いたままにしちょってね。</span></p>
   <p style="color:#aaa;font-size:.75em;margin-top:14px" id="upd">10秒ごとに自動更新中...</p>
 </div>
+
+<div class="card" id="alert-box" style="text-align:center">
+  <button type="button" class="lbtn lbtn-alert" id="alert-btn" onclick="enableAlert()">🔔 音とバイブでお知らせを受け取る</button>
+  <p class="lnote" id="alert-note">タップしちょくと、呼ばれた時に音（とバイブ）でお知らせするき。<br>マナーモードやと音は鳴らんことがあるき注意してね。</p>
+</div>
+
+${lineSection}
+
 <script>
 (function(){
-  var t=setInterval(function(){
-    fetch("/api/position/${id}").then(function(r){return r.json()}).then(function(d){
-      if(d.status==="called"){
-        document.getElementById("pa").style.display="none";
-        document.getElementById("ca").style.display="block";
-        document.getElementById("upd").textContent="";clearInterval(t);
-      }else if(d.status==="done"){
-        document.getElementById("pa").innerHTML='<p style="color:#888">完了しました</p>';
-        document.getElementById("upd").textContent="";clearInterval(t);
-      }else{document.getElementById("pos").textContent=d.position;}
-    }).catch(function(){});
-  },10000);
+  var ID=${id};
+  var LIMIT=${CALL_LIMIT_MS};
+  var OFFSET=${Date.now()}-Date.now();
+  var state=${JSON.stringify(init)};
+  var lastCalledAt='';
+  var calledAtMs=0;
+  var acked=false;
+  var alarmTimer=null;
+  var audioCtx=null;
+  var wakeLock=null;
+  var stopped=false;
+  var baseTitle=document.title;
+  var $=function(id){return document.getElementById(id)};
+
+  // ── 音（Web Audio）──
+  function unlockAudio(){
+    try{
+      if(!audioCtx){
+        var AC=window.AudioContext||window.webkitAudioContext;
+        if(AC)audioCtx=new AC();
+      }
+      if(audioCtx&&audioCtx.state==='suspended')audioCtx.resume();
+    }catch(e){}
+  }
+  function beep(times){
+    if(!audioCtx)return;
+    try{
+      var t0=audioCtx.currentTime+0.05;
+      for(var i=0;i<times;i++){
+        var o=audioCtx.createOscillator(),g=audioCtx.createGain();
+        o.type='square';o.frequency.value=(i%2)?1175:880;
+        g.gain.setValueAtTime(0.0001,t0+i*0.35);
+        g.gain.exponentialRampToValueAtTime(0.4,t0+i*0.35+0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001,t0+i*0.35+0.28);
+        o.connect(g);g.connect(audioCtx.destination);
+        o.start(t0+i*0.35);o.stop(t0+i*0.35+0.3);
+      }
+    }catch(e){}
+  }
+  function vibrate(p){try{if(navigator.vibrate)navigator.vibrate(p)}catch(e){}}
+
+  // ── 画面を消さない（対応している端末のみ）──
+  function keepAwake(){
+    try{
+      if('wakeLock' in navigator&&!wakeLock&&document.visibilityState==='visible'){
+        navigator.wakeLock.request('screen').then(function(l){
+          wakeLock=l;l.addEventListener('release',function(){wakeLock=null});
+        }).catch(function(){});
+      }
+    }catch(e){}
+  }
+
+  window.enableAlert=function(){
+    unlockAudio();beep(2);vibrate(200);keepAwake();
+    $('alert-btn').textContent='🔔 音とバイブのお知らせ：オン';
+    $('alert-btn').classList.add('on');
+    $('alert-note').innerHTML='準備OK！呼ばれたら音とバイブでお知らせするき。<br>この画面を開いたままにしちょってね。';
+  };
+  // どこかをタップした時も音を使えるようにしておく（iPhoneは操作が必要なため）
+  document.addEventListener('touchend',unlockAudio,{once:true});
+  document.addEventListener('click',unlockAudio,{once:true});
+
+  // ── 呼び出しアラーム ──
+  function ring(){
+    if(acked)return;
+    beep(6);
+    vibrate([500,200,500,200,800]);
+  }
+  function startAlarm(){
+    acked=false;
+    stopAlarm();
+    ring();
+    alarmTimer=setInterval(function(){
+      if(acked||remain()<=0){stopAlarm();return;}
+      ring();
+    },15000);
+    $('ack-btn').style.display='inline-block';
+  }
+  function stopAlarm(){if(alarmTimer){clearInterval(alarmTimer);alarmTimer=null}}
+  window.ack=function(){acked=true;stopAlarm();vibrate(0);$('ack-btn').style.display='none'};
+
+  function remain(){return calledAtMs?LIMIT-((Date.now()+OFFSET)-calledAtMs):LIMIT}
+  function pad(n){return (n<10?'0':'')+n}
+  function tickTimer(){
+    if(state.status!=='called')return;
+    var r=remain(),el=$('call-timer');
+    if(r<=0){
+      el.textContent='時間切れ';
+      el.classList.add('over');
+      $('call-timer-label').textContent='急いでお店に声かけてや！';
+      document.title='【時間切れ】'+baseTitle;
+    }else{
+      var m=Math.floor(r/60000),s=Math.floor((r%60000)/1000);
+      el.textContent=pad(m)+':'+pad(s);
+      el.classList.toggle('warn',r<120000);
+      el.classList.remove('over');
+      $('call-timer-label').textContent='残り時間';
+      document.title=(s%2?'【呼出中】':'📣')+baseTitle;
+    }
+  }
+  setInterval(tickTimer,1000);
+
+  function showEnd(html){
+    stopped=true;stopAlarm();
+    document.body.classList.remove('called');
+    $('call-screen').style.display='none';
+    $('pa').style.display='none';
+    $('wait-note').style.display='none';
+    $('alert-box').style.display='none';
+    $('end-area').innerHTML=html;
+    $('end-area').style.display='block';
+    $('upd').textContent='';
+    document.title=baseTitle;
+  }
+
+  function apply(d){
+    if(!d||!d.found){
+      showEnd('この受付は取り消されたで。<br>わからんことがあったら、お店の人に声かけてや〜');return;
+    }
+    state.status=d.status;
+    if($('line-on')&&d.linked){$('line-off').style.display='none';$('line-on').style.display='block'}
+
+    if(d.status==='called'){
+      calledAtMs=Date.parse(d.called_at)||calledAtMs||(Date.now()+OFFSET);
+      document.body.classList.add('called');
+      $('call-screen').style.display='block';
+      $('pa').style.display='none';
+      $('wait-note').style.display='none';
+      $('head').textContent='順番きたで！';
+      if(d.called_at!==lastCalledAt){
+        lastCalledAt=d.called_at;
+        startAlarm();
+        window.scrollTo(0,0);
+      }
+      tickTimer();
+    }else if(d.status==='waiting'){
+      stopAlarm();lastCalledAt='';calledAtMs=0;
+      document.body.classList.remove('called');
+      $('call-screen').style.display='none';
+      $('pa').style.display='block';
+      $('wait-note').style.display='block';
+      $('head').textContent='受付できたで！';
+      $('pos').textContent=d.position;
+      document.title=baseTitle;
+    }else if(d.status==='done'){
+      showEnd('<b style="color:#06c755;font-size:1.2em">ご来店ありがとうございました！</b><br>また来てや〜');
+    }else if(d.status==='skipped'){
+      showEnd('時間内に来られんかったき、順番を次に回したで。<br>お店の人に声かけてや〜');
+    }
+  }
+
+  function poll(){
+    if(stopped)return;
+    fetch('/api/position/'+ID,{cache:'no-store'})
+      .then(function(r){return r.json()})
+      .then(apply)
+      .catch(function(){});
+  }
+
+  apply({found:true,status:state.status,position:state.position,called_at:state.called_at,linked:state.linked});
+  setInterval(poll,10000);
+  document.addEventListener('visibilitychange',function(){
+    if(document.visibilityState==='visible'){poll();keepAwake();}
+  });
 })();
 </script>`,
-`.lbtn{display:block;width:100%;padding:14px;border-radius:10px;font-size:1em;font-weight:bold;text-align:center;text-decoration:none;color:#fff}
-.lbtn-add{background:#06c755}
-.lbtn-add:active{background:#05a648}
+`.lbtn{display:block;width:100%;padding:14px;border-radius:10px;font-size:1em;font-weight:bold;text-align:center;text-decoration:none;color:#fff;border:none;cursor:pointer}
+.lbtn-main,.lbtn-add{background:#06c755}
+.lbtn-main:active,.lbtn-add:active{background:#05a648}
 .lbtn-link{background:#4a90d9}
-.lbtn-link:active{background:#3a7bc0}`));
+.lbtn-link:active{background:#3a7bc0}
+.lbtn-alert{background:#ff9800}
+.lbtn-alert.on{background:#fff3e0;color:#e65100;border:2px solid #ffb74d}
+.lnote{color:#888;font-size:.78em;margin-top:8px;line-height:1.6}
+body.called{background:#ff9800}
+.call-card{text-align:center;background:#fff;border:6px solid #e65100;animation:pulse 1.2s ease-in-out infinite}
+.call-icon{font-size:3.5em;line-height:1}
+.call-msg{font-size:1.45em;font-weight:bold;color:#e65100;line-height:1.6;margin:12px 0 18px}
+.call-timer-label{color:#666;font-size:.9em}
+.call-timer{font-family:monospace;font-size:3.6em;font-weight:bold;color:#333;letter-spacing:.04em}
+.call-timer.warn{color:#e53935}
+.call-timer.over{color:#e53935;font-size:2.4em}
+.ack-btn{margin-top:16px;padding:14px 24px;border:none;border-radius:10px;background:#e65100;color:#fff;font-size:1em;font-weight:bold;cursor:pointer}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(230,81,0,.6)}50%{box-shadow:0 0 0 14px rgba(230,81,0,0)}}`));
 });
 
 // ══════════════════════════════════════════
@@ -304,12 +544,12 @@ app.get('/status', (_req, res) => {
   const called  = Q.called.all();
 
   const calledHtml = called.map(t =>
-    `<div class="tk called"><span class="tn">#${t.id}</span>${t.name}さん（${t.people}名）<span class="bd bc">呼出中</span></div>`
+    `<div class="tk called"><span class="tn">#${t.id}</span>${esc(t.name)}さん（${t.people}名）<span class="bd bc">呼出中</span></div>`
   ).join('');
 
   const waitHtml = waiting.length > 0
     ? waiting.map((t, i) =>
-      `<div class="tk"><span class="tn">#${t.id}</span>${t.name}さん（${t.people}名）<span class="bd">${i+1}番目</span></div>`
+      `<div class="tk"><span class="tn">#${t.id}</span>${esc(t.name)}さん（${t.people}名）<span class="bd">${i+1}番目</span></div>`
     ).join('')
     : '<p style="text-align:center;color:#aaa;padding:20px">現在待ちはありません</p>';
 
@@ -341,28 +581,38 @@ app.get('/admin', (_req, res) => {
   const WAIT_TH = '<tr><th>No</th><th>名前</th><th>電話</th><th>人数</th><th>待ち時間</th><th>LINE</th><th>操作</th></tr>';
   const CALL_TH = '<tr><th>No</th><th>名前</th><th>電話</th><th>人数</th><th>残り</th><th>操作</th></tr>';
 
+  function lineBadge(t) {
+    return t.line_user_id
+      ? '<span class="ln-on">✅連携</span>'
+      : '<span class="ln-off">未連携</span>';
+  }
+
   function waitRow(t) {
-    const ln = t.line_user_id ? '✅' : '-';
     const createdMs = parseCreatedAt(t.created_at);
     const elapsed = createdMs ? formatElapsed(Date.now() - createdMs) : '-';
     const jst = createdMs ? '受付 ' + formatJstTime(createdMs) : '';
     const btns = `<button class="btn bg sm" onclick="act('call',${t.id})">呼び出し</button> <button class="btn br sm" onclick="act('delete',${t.id})">削除</button>`;
-    return `<tr><td><b>#${t.id}</b></td><td>${t.name}</td><td>${t.phone||'-'}</td><td>${t.people}名</td><td class="wait-cell" data-created-ms="${createdMs || ''}" title="${jst}">${elapsed}</td><td>${ln}</td><td>${btns}</td></tr>`;
+    return `<tr><td><b>#${t.id}</b></td><td>${esc(t.name)}</td><td>${esc(t.phone)||'-'}</td><td>${t.people}名</td><td class="wait-cell" data-created-ms="${createdMs || ''}" title="${jst}">${elapsed}</td><td>${lineBadge(t)}</td><td>${btns}</td></tr>`;
   }
 
   function callRow(t) {
-    const ca = t.called_at || '';
+    const ca = esc(t.called_at || '');
     const btns = `<button class="btn bo sm" onclick="act('recall',${t.id})">再呼出</button> <button class="btn bo sm" onclick="act('done',${t.id})">完了</button> <button class="btn bg2 sm" onclick="act('requeue',${t.id})">戻す</button>`;
     const skipBtn = `<button class="btn br sm skip-btn" onclick="act('skip',${t.id})" style="display:none" data-skip-id="${t.id}">飛ばす</button>`;
-    return `<tr data-called-at="${ca}" data-id="${t.id}"><td><b>#${t.id}</b></td><td>${t.name}</td><td>${t.phone||'-'}</td><td>${t.people}名</td><td class="timer-cell">--:--</td><td>${btns} ${skipBtn}</td></tr>`;
+    return `<tr data-called-at="${ca}" data-id="${t.id}"><td><b>#${t.id}</b></td><td>${esc(t.name)} ${t.line_user_id ? '<span class="ln-on" title="LINE連携済み">✅</span>' : ''}</td><td>${esc(t.phone)||'-'}</td><td>${t.people}名</td><td class="timer-cell">--:--</td><td>${btns} ${skipBtn}</td></tr>`;
   }
 
   const waitRows = waiting.map(t => waitRow(t)).join('');
   const callRows = called.map(t => callRow(t)).join('');
 
+  const lineMode = CUSTOMER_LINE_READY
+    ? '<span style="color:#06c755">お客さんLINE通知：オン（連携した人に届く）</span>'
+    : `<span style="color:#999">お客さんLINE通知：オフ${!ENABLE_CUSTOMER_PUSH ? '（ENABLE_CUSTOMER_PUSH=false）' : !lineClient ? '（LINEトークン未設定）' : '（LINE_OFFICIAL_ID 未設定）'}／受付後の画面には表示されます</span>`;
+
   res.send(layout(`${STORE_NAME} 管理`, `
 <div class="card">
-  <h1 style="color:#06c755;font-size:1.2em;margin-bottom:14px">${STORE_NAME} 管理画面</h1>
+  <h1 style="color:#06c755;font-size:1.2em;margin-bottom:6px">${STORE_NAME} 管理画面</h1>
+  <p style="font-size:.75em;margin-bottom:14px">${lineMode}</p>
   <div style="display:flex;gap:10px;margin-bottom:18px">
     <div style="flex:1;text-align:center;background:#e8f5e9;padding:12px;border-radius:8px">
       <div style="font-size:2em;font-weight:bold;color:#06c755">${waiting.length}</div>
@@ -395,7 +645,7 @@ async function act(a,id){
   if((a==='call'||a==='recall')&&d.success)alert('呼び出しました');
   location.reload();
 }
-var LIMIT=7*60*1000;
+var LIMIT=${CALL_LIMIT_MS};
 // サーバーとスマホ/PCの時計のずれを補正（待ち時間の計算用）
 var CLOCK_OFFSET=${Date.now()}-Date.now();
 function fmtWait(ms){
@@ -447,7 +697,9 @@ table{width:100%;border-collapse:collapse;font-size:.82em}
 th{background:#f8f9fa;padding:7px 5px;text-align:left;font-size:.78em;color:#666;white-space:nowrap}
 td{padding:7px 5px;border-bottom:1px solid #f0f0f0;white-space:nowrap}
 .sm{padding:3px 8px;font-size:.75em;margin:1px}
-.timer-cell{font-family:monospace;font-size:1.1em;min-width:56px}`));
+.timer-cell{font-family:monospace;font-size:1.1em;min-width:56px}
+.ln-on{color:#06c755;font-weight:bold}
+.ln-off{color:#bbb;font-size:.9em}`));
 });
 
 // ══════════════════════════════════════════
@@ -519,13 +771,14 @@ app.post('/call/:id', async (req, res) => {
   const now = new Date().toISOString();
   Q.setCalled.run(now, id);
 
-  const callMsg = `大正町市場やき！\n${id}番のお客さん、順番きたで〜！\n7分以内に戻ってきてや。\n来んかったら次に回すきね。`;
+  const callMsg = callMessage(id);
 
   // 管理者へLINE通知
   if (ADMIN_USER_ID) {
     await pushMsg(ADMIN_USER_ID, callMsg);
   }
 
+  // お客さんへLINE通知（LINE連携済みの人だけ）
   if (ENABLE_CUSTOMER_PUSH && t.line_user_id) {
     await pushMsg(t.line_user_id, callMsg);
   }
@@ -575,19 +828,24 @@ app.post('/delete/:id', (_req, res) => {
 });
 
 // ══════════════════════════════════════════
-//  GET /api/position/:id ── 順番確認API
+//  GET /api/position/:id ── 順番確認API（受付後の画面が10秒ごとに使う）
 // ══════════════════════════════════════════
 app.get('/api/position/:id', (req, res) => {
+  res.set('Cache-Control', 'no-store');
   const id = parseInt(req.params.id, 10);
   const t  = Q.get.get(id);
   if (!t) return res.json({ found: false, status: 'unknown', position: 0, total: 0 });
 
-  const total = Q.cntWait.get().c;
-  if (t.status === 'called') return res.json({ found: true, status: 'called', position: 0, total });
-  if (t.status === 'done')   return res.json({ found: true, status: 'done',   position: 0, total: 0 });
+  const total  = Q.cntWait.get().c;
+  const linked = !!t.line_user_id;
+  if (t.status === 'called') {
+    return res.json({ found: true, status: 'called', position: 0, total, called_at: t.called_at || '', limit_ms: CALL_LIMIT_MS, linked });
+  }
+  if (t.status === 'done')    return res.json({ found: true, status: 'done',    position: 0, total: 0, linked });
+  if (t.status === 'skipped') return res.json({ found: true, status: 'skipped', position: 0, total, linked });
 
   const pos = Q.position.get(id).p + 1;
-  res.json({ found: true, status: 'waiting', position: pos, total });
+  res.json({ found: true, status: 'waiting', position: pos, total, linked });
 });
 
 // ══════════════════════════════════════════
@@ -615,6 +873,16 @@ app.post('/webhook', (req, res) => {
 async function handleLineEvent(event) {
   // ── 全イベントで userId をログ出力（ADMIN_USER_ID 特定用） ──
   console.log('[LINE] userId=', event.source?.userId);
+
+  // ── 友だち追加された時：連携のやり方を案内（返信なので無料） ──
+  if (event.type === 'follow' && event.replyToken) {
+    if (!ENABLE_CUSTOMER_PUSH) return;
+    return replyMsg(event.replyToken,
+      `友だち追加ありがとう！${STORE_NAME}やき。\n\n` +
+      `順番待ちの受付をした人は、受付後の画面に戻って「② 連携メッセージを送る」を押してや〜。\n` +
+      `呼ばれたら、ここにお知らせするき！`
+    );
+  }
 
   if (event.type !== 'message' || event.message.type !== 'text') return;
 
@@ -645,7 +913,7 @@ async function handleLineEvent(event) {
       return replyMsg(replyToken, `受付番号 ${id} はもうLINE連携済みやき！順番が来たらお知らせするき待っちょってや〜`);
     }
     // linkToken の先頭が一致するか検証
-    if (!t.link_token || !t.link_token.startsWith(tokenInput)) {
+    if (!t.link_token || tokenInput.length < 8 || !t.link_token.startsWith(tokenInput)) {
       return replyMsg(replyToken, `連携コードが合わんかったで。受付画面のボタンからもう一回やってみてや〜`);
     }
 
@@ -721,6 +989,7 @@ app.listen(PORT, () => {
   console.log(`LINE SDK         : ${lineClient ? 'OK' : '未設定'}`);
   console.log(`ADMIN_USER_ID    : ${ADMIN_USER_ID ? ADMIN_USER_ID.substring(0, 8) + '...' : '未設定'}`);
   console.log(`CUSTOMER_PUSH    : ${ENABLE_CUSTOMER_PUSH ? 'ON' : 'OFF'}`);
-  console.log(`Routes           : / /form /status /admin /admin/qr /webhook`);
+  console.log(`CUSTOMER LINE UI : ${CUSTOMER_LINE_READY ? 'ON' : 'OFF（LINE_OFFICIAL_ID か LINE_ADD_FRIEND_URL が必要）'}`);
+  console.log(`Routes           : / /form /register /ticket/:id /status /admin /admin/qr /webhook`);
   console.log('==========================================');
 });
