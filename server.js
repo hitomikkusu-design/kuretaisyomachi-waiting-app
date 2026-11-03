@@ -121,6 +121,37 @@ function baseUrl(req) {
 }
 
 // ══════════════════════════════════════════
+//  時刻ユーティリティ
+// ══════════════════════════════════════════
+// created_at は SQLite の datetime('now','localtime') で
+// 「YYYY-MM-DD HH:MM:SS」（サーバーのローカル時刻・タイムゾーン表記なし）で保存されている。
+// Node の Date はタイムゾーン表記なしの日時をサーバーのローカル時刻として解釈するので、
+// 同じサーバー上で解釈すれば正しい絶対時刻（ミリ秒）になる。
+function parseCreatedAt(s) {
+  if (!s) return 0;
+  const str = String(s).trim();
+  const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(str);
+  const ms = hasZone ? Date.parse(str) : new Date(str.replace(' ', 'T')).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+// 経過時間を「3分」「1時間5分」の形に
+function formatElapsed(ms) {
+  if (!(ms >= 60000)) return '1分未満';
+  const min = Math.floor(ms / 60000);
+  if (min < 60) return min + '分';
+  return Math.floor(min / 60) + '時間' + (min % 60) + '分';
+}
+
+// 日本時間（Asia/Tokyo）の「HH:MM」
+const JST_FMT = new Intl.DateTimeFormat('ja-JP', {
+  timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hour12: false
+});
+function formatJstTime(ms) {
+  return JST_FMT.format(new Date(ms));
+}
+
+// ══════════════════════════════════════════
 //  HTML レイアウト共通
 // ══════════════════════════════════════════
 function layout(title, body, extraCss) {
@@ -307,14 +338,16 @@ app.get('/admin', (_req, res) => {
   const waiting = Q.waiting.all();
   const called  = Q.called.all();
 
-  const WAIT_TH = '<tr><th>No</th><th>名前</th><th>電話</th><th>人数</th><th>時刻</th><th>LINE</th><th>操作</th></tr>';
+  const WAIT_TH = '<tr><th>No</th><th>名前</th><th>電話</th><th>人数</th><th>待ち時間</th><th>LINE</th><th>操作</th></tr>';
   const CALL_TH = '<tr><th>No</th><th>名前</th><th>電話</th><th>人数</th><th>残り</th><th>操作</th></tr>';
 
   function waitRow(t) {
     const ln = t.line_user_id ? '✅' : '-';
-    const tm = t.created_at ? t.created_at.substring(11, 16) : '';
+    const createdMs = parseCreatedAt(t.created_at);
+    const elapsed = createdMs ? formatElapsed(Date.now() - createdMs) : '-';
+    const jst = createdMs ? '受付 ' + formatJstTime(createdMs) : '';
     const btns = `<button class="btn bg sm" onclick="act('call',${t.id})">呼び出し</button> <button class="btn br sm" onclick="act('delete',${t.id})">削除</button>`;
-    return `<tr><td><b>#${t.id}</b></td><td>${t.name}</td><td>${t.phone||'-'}</td><td>${t.people}名</td><td>${tm}</td><td>${ln}</td><td>${btns}</td></tr>`;
+    return `<tr><td><b>#${t.id}</b></td><td>${t.name}</td><td>${t.phone||'-'}</td><td>${t.people}名</td><td class="wait-cell" data-created-ms="${createdMs || ''}" title="${jst}">${elapsed}</td><td>${ln}</td><td>${btns}</td></tr>`;
   }
 
   function callRow(t) {
@@ -363,6 +396,23 @@ async function act(a,id){
   location.reload();
 }
 var LIMIT=7*60*1000;
+// サーバーとスマホ/PCの時計のずれを補正（待ち時間の計算用）
+var CLOCK_OFFSET=${Date.now()}-Date.now();
+function fmtWait(ms){
+  if(ms<60000)return '1分未満';
+  var min=Math.floor(ms/60000);
+  if(min<60)return min+'分';
+  return Math.floor(min/60)+'時間'+(min%60)+'分';
+}
+function tickWait(){
+  var now=Date.now()+CLOCK_OFFSET;
+  document.querySelectorAll('.wait-cell[data-created-ms]').forEach(function(td){
+    var c=parseInt(td.getAttribute('data-created-ms'),10);
+    if(!c)return;
+    td.textContent=fmtWait(Math.max(0,now-c));
+  });
+}
+tickWait();setInterval(tickWait,1000);
 function tick(){
   document.querySelectorAll('[data-called-at]').forEach(function(tr){
     var ca=tr.getAttribute('data-called-at');
